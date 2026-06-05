@@ -1,45 +1,88 @@
-import { Link, Stack } from "expo-router";
+import { Stack, router } from "expo-router";
+
 import { StyleSheet, Text, View } from "react-native";
 
-import { useColors } from "@/hooks/useColors";
+
+
+import { PrimaryButton, ScreenShell, flow, safeBottom, safeTop } from "@/components/DriverFlowUI";
+
+
 
 export default function NotFoundScreen() {
-  const colors = useColors();
 
   return (
-    <>
-      <Stack.Screen options={{ title: "Oops!" }} />
-      <View style={[styles.container, { backgroundColor: colors.background }]}>
-        <Text style={[styles.title, { color: colors.foreground }]}>
-          This screen doesn&apos;t exist.
-        </Text>
 
-        <Link href="/" style={styles.link}>
-          <Text style={[styles.linkText, { color: colors.primary }]}>
-            Go to home screen!
-          </Text>
-        </Link>
-      </View>
+    <>
+
+      <Stack.Screen options={{ title: "Oops!" }} />
+
+      <ScreenShell>
+
+        <View style={[styles.container, { paddingTop: safeTop(), paddingBottom: safeBottom() + 24 }]}>
+
+          <View style={styles.card}>
+
+            <Text style={styles.kicker}>SD DRIVER APP</Text>
+
+            <Text style={styles.title}>Screen unavailable</Text>
+
+            <Text style={styles.subtitle}>Return to the official driver flow.</Text>
+
+            <PrimaryButton label="BACK TO HOME" onPress={() => router.replace("/")} />
+
+          </View>
+
+        </View>
+
+      </ScreenShell>
+
     </>
+
   );
+
 }
 
+
+
 const styles = StyleSheet.create({
+
   container: {
+
     flex: 1,
+
     alignItems: "center",
+
     justifyContent: "center",
-    padding: 20,
+
+    paddingHorizontal: flow.space.xl,
+
   },
-  title: {
-    fontSize: 20,
-    fontWeight: "bold",
+
+  card: {
+
+    width: "100%",
+
+    borderWidth: 1,
+
+    borderColor: flow.line,
+
+    borderRadius: flow.radius,
+
+    backgroundColor: "rgba(10,13,18,0.96)",
+
+    padding: flow.space.lg,
+
+    alignItems: "center",
+
+    gap: flow.space.sm,
+
   },
-  link: {
-    marginTop: 15,
-    paddingVertical: 15,
-  },
-  linkText: {
-    fontSize: 14,
-  },
+
+  kicker: { color: flow.cyan, fontSize: 11, fontFamily: "Inter_700Bold", letterSpacing: 1.4 },
+
+  title: { color: flow.text, fontSize: 20, fontFamily: "Inter_700Bold", textAlign: "center" },
+
+  subtitle: { color: flow.muted, fontSize: 12, fontFamily: "Inter_400Regular", textAlign: "center" },
+
 });
+

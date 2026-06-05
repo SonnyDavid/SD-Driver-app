@@ -45,6 +45,7 @@ export type Database = {
 
 export interface DriverRow {
   id: string;
+  driver_id: string | null;
   name: string;
   email: string;
   phone: string;
@@ -52,6 +53,7 @@ export interface DriverRow {
   vehicle_type: "car" | "van" | "motorcycle";
   vehicle_registration: string;
   vehicle_photo_uri: string | null;
+  profile_photo_uri: string | null;
   status: "pending" | "verified" | "suspended";
   is_online: boolean;
   created_at: string;
@@ -59,6 +61,8 @@ export interface DriverRow {
 
 export interface OrderRow {
   id: string;
+  /** Public order number shown to drivers (e.g. SD-ORD-10007). */
+  order_id?: string | null;
   pickup_address: string;
   delivery_address: string;
   distance: string;
@@ -73,34 +77,37 @@ export interface OrderRow {
   recipient_name: string;
   package_id: string;
   delivery_notes: string;
+  pickup_instructions?: string | null;
+  sender_name?: string | null;
+  sender_phone?: string | null;
+  delivery_confirmation_pin?: string | null;
+  delivery_photo_url?: string | null;
+  delivery_proof_photo_url?: string | null;
+  completed_at?: string | null;
+  delivered_at?: string | null;
   pin: string;
-  status:
-    | "pending"
-    | "driver_assigned"
-    | "package_collected"
-    | "en_route"
-    | "arriving"
-    | "delivered"
-    | "cancelled";
+  status: string;
   driver_id: string | null;
   created_at: string;
 }
 
+/** Matches live `public.deliveries` (status includes `delivered`). */
 export interface DeliveryRow {
   id: string;
   order_id: string;
   driver_id: string;
+  customer_id?: string | null;
   pickup_address: string;
   delivery_address: string;
-  distance: string;
-  amount: number;
-  duration_minutes: number;
-  route: string;
-  completed_at: string;
+  distance?: number | string | null;
+  payout?: number | string | null;
+  price?: number | string | null;
+  status?: string | null;
   created_at: string;
-
-  recipient_phone: string;
-  recipient_name: string;
-  package_id: string;
-  delivery_notes: string;
+  recipient_phone?: string | null;
+  recipient_name?: string | null;
+  package_id?: string | null;
+  delivery_notes?: string | null;
+  sender_name?: string | null;
+  sender_phone?: string | null;
 }

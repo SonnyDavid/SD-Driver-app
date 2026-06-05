@@ -1,18 +1,14 @@
+export { ApprovalPendingScreen as default } from "@/components/DriverFlowScreens";
+/*
 import { Feather } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
+import { LinearGradient } from "expo-linear-gradient";
 import { router, useLocalSearchParams } from "expo-router";
 import React, { useEffect, useRef } from "react";
-import {
-  Animated,
-  Platform,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View,
-} from "react-native";
+import { Animated, Image, Platform, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { useColors } from "@/hooks/useColors";
+const SD_LOGO = require("@/assets/images/sd-logo.png");
 
 export default function RegisterSuccessScreen() {
   const { driverId, name, vehicleRegistration } = useLocalSearchParams<{
@@ -20,137 +16,98 @@ export default function RegisterSuccessScreen() {
     name: string;
     vehicleRegistration: string;
   }>();
-  const colors = useColors();
   const insets = useSafeAreaInsets();
-
   const scaleAnim = useRef(new Animated.Value(0)).current;
   const fadeAnim = useRef(new Animated.Value(0)).current;
-  const [copied, setCopied] = React.useState(false);
 
   useEffect(() => {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    Animated.sequence([
+    Animated.parallel([
       Animated.spring(scaleAnim, { toValue: 1, tension: 55, friction: 7, useNativeDriver: true }),
-      Animated.timing(fadeAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
+      Animated.timing(fadeAnim, { toValue: 1, duration: 450, useNativeDriver: true }),
     ]).start();
-  }, []);
-
-  async function copyId() {
-    if (driverId) {
-      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
-  }
+  }, [fadeAnim, scaleAnim]);
 
   const topPad = Platform.OS === "web" ? 67 : insets.top;
   const bottomPad = Platform.OS === "web" ? 34 : insets.bottom;
 
   return (
-    <View style={[styles.container, { backgroundColor: colors.background, paddingTop: topPad, paddingBottom: bottomPad }]}>
+    <View style={[styles.container, { paddingTop: topPad + 2, paddingBottom: bottomPad + 14 }]}>
+      <LinearGradient colors={["#000", "#090604", "#000"]} style={StyleSheet.absoluteFill} />
+      <Image source={SD_LOGO} style={styles.logo} resizeMode="contain" />
+
       <View style={styles.content}>
-        <Animated.View style={[styles.iconWrapper, { transform: [{ scale: scaleAnim }] }]}>
-          <View style={[styles.iconBg, { backgroundColor: colors.success + "20" }]}>
-            <View style={[styles.iconInner, { backgroundColor: colors.success }]}>
-              <Feather name="check" size={40} color="#fff" />
+        <Animated.View style={[styles.successWrap, { transform: [{ scale: scaleAnim }] }]}>
+          <View style={styles.successGlow}>
+            <View style={styles.successCircle}>
+              <Feather name="check" size={42} color="#FFFFFF" />
             </View>
           </View>
         </Animated.View>
 
-        <Animated.View style={{ opacity: fadeAnim, alignItems: "center", gap: 8 }}>
-          <Text style={[styles.title, { color: colors.foreground }]}>Registration Successful!</Text>
-          <Text style={[styles.subtitle, { color: colors.mutedForeground }]}>
-            Your driver account has been created
-          </Text>
-        </Animated.View>
+        <Animated.View style={{ opacity: fadeAnim, width: "100%", alignItems: "center" }}>
+          <Text style={styles.title}>Almost Done!</Text>
+          <Text style={styles.subtitle}>Your driver application has been submitted for admin approval.</Text>
 
-        <Animated.View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border, opacity: fadeAnim }]}>
-          <Row label="Driver Name" value={name ?? ""} colors={colors} />
-          <View style={[styles.divider, { backgroundColor: colors.border }]} />
-
-          <Text style={[styles.idLabel, { color: colors.mutedForeground }]}>DRIVER ID</Text>
-          <View style={[styles.idRow, { backgroundColor: colors.primary + "15", borderColor: colors.primary + "40" }]}>
-            <Text style={[styles.idValue, { color: colors.primary }]}>{driverId}</Text>
-          </View>
-
-          <View style={[styles.divider, { backgroundColor: colors.border }]} />
-          <Row label="Vehicle Registration" value={vehicleRegistration ?? ""} colors={colors} />
-          <View style={[styles.divider, { backgroundColor: colors.border }]} />
-
-          <View style={[styles.statusRow, { backgroundColor: colors.muted }]}>
-            <View style={[styles.statusDot, { backgroundColor: "#FBBF24" }]} />
-            <Text style={[styles.statusLabel, { color: colors.mutedForeground }]}>Account Status</Text>
-            <Text style={[styles.statusValue, { color: "#FBBF24" }]}>Pending Verification</Text>
-          </View>
-        </Animated.View>
-
-        <Animated.View style={{ opacity: fadeAnim, width: "100%" }}>
-          <View style={[styles.infoBox, { backgroundColor: colors.card, borderColor: colors.primary + "30" }]}>
-            <Feather name="info" size={16} color={colors.primary} />
-            <Text style={[styles.infoText, { color: colors.mutedForeground }]}>
-              Use your <Text style={{ color: colors.primary, fontFamily: "Inter_600SemiBold" }}>Driver ID</Text> and password to log into the SD Driver system.
-            </Text>
+          <View style={styles.card}>
+            <InfoRow label="Driver Name" value={name || "SD Driver"} />
+            <View style={styles.divider} />
+            <Text style={styles.idLabel}>DRIVER ID</Text>
+            <View style={styles.idBox}>
+              <Text style={styles.idValue}>{driverId}</Text>
+            </View>
+            <View style={styles.divider} />
+            <InfoRow label="Vehicle Registration" value={vehicleRegistration || "Pending"} />
+            <View style={styles.statusBox}>
+              <View style={styles.statusDot} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.statusTitle}>Pending Review</Text>
+                <Text style={styles.statusSub}>Please wait for admin approval before accepting deliveries.</Text>
+              </View>
+            </View>
           </View>
         </Animated.View>
       </View>
 
-      <Animated.View style={[styles.buttons, { opacity: fadeAnim }]}>
-        <TouchableOpacity
-          style={[styles.copyBtn, { borderColor: colors.primary }]}
-          onPress={copyId}
-          activeOpacity={0.85}
-        >
-          <Feather name={copied ? "check" : "copy"} size={18} color={colors.primary} />
-          <Text style={[styles.copyText, { color: colors.primary }]}>{copied ? "Copied!" : "Copy Driver ID"}</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[styles.continueBtn, { backgroundColor: colors.primary }]}
-          onPress={() => router.replace("/login")}
-          activeOpacity={0.85}
-        >
-          <Text style={styles.continueText}>Continue to Login</Text>
-          <Feather name="arrow-right" size={20} color="#fff" />
-        </TouchableOpacity>
-      </Animated.View>
+      <TouchableOpacity style={styles.button} onPress={() => router.replace("/login")} activeOpacity={0.86}>
+        <Text style={styles.buttonText}>CONTINUE TO SIGN IN</Text>
+        <Feather name="arrow-right" size={20} color="#111" />
+      </TouchableOpacity>
     </View>
   );
 }
 
-function Row({ label, value, colors }: { label: string; value: string; colors: ReturnType<typeof import("@/hooks/useColors").useColors> }) {
+function InfoRow({ label, value }: { label: string | string[]; value: string | string[] }) {
   return (
-    <View style={styles.rowWrap}>
-      <Text style={[styles.rowLabel, { color: colors.mutedForeground }]}>{label}</Text>
-      <Text style={[styles.rowValue, { color: colors.foreground }]}>{value}</Text>
+    <View style={styles.row}>
+      <Text style={styles.rowLabel}>{label}</Text>
+      <Text style={styles.rowValue}>{value}</Text>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, paddingHorizontal: 24 },
-  content: { flex: 1, alignItems: "center", justifyContent: "center", gap: 24 },
-  iconWrapper: { marginBottom: 4 },
-  iconBg: { width: 120, height: 120, borderRadius: 60, alignItems: "center", justifyContent: "center" },
-  iconInner: { width: 80, height: 80, borderRadius: 40, alignItems: "center", justifyContent: "center" },
-  title: { fontSize: 24, fontFamily: "Inter_700Bold", textAlign: "center" },
-  subtitle: { fontSize: 14, fontFamily: "Inter_400Regular", textAlign: "center" },
-  card: { width: "100%", borderRadius: 18, borderWidth: 1, padding: 20, gap: 14 },
-  divider: { height: 1 },
-  rowWrap: { gap: 3 },
-  rowLabel: { fontSize: 11, fontFamily: "Inter_600SemiBold", textTransform: "uppercase", letterSpacing: 0.8 },
-  rowValue: { fontSize: 15, fontFamily: "Inter_600SemiBold" },
-  idLabel: { fontSize: 11, fontFamily: "Inter_600SemiBold", textTransform: "uppercase", letterSpacing: 0.8 },
-  idRow: { borderRadius: 10, borderWidth: 1, padding: 14, alignItems: "center" },
-  idValue: { fontSize: 24, fontFamily: "Inter_700Bold", letterSpacing: 2 },
-  statusRow: { flexDirection: "row", alignItems: "center", padding: 12, borderRadius: 10, gap: 8 },
-  statusDot: { width: 8, height: 8, borderRadius: 4 },
-  statusLabel: { fontSize: 12, fontFamily: "Inter_500Medium", flex: 1 },
-  statusValue: { fontSize: 13, fontFamily: "Inter_700Bold" },
-  infoBox: { flexDirection: "row", gap: 10, padding: 14, borderRadius: 12, borderWidth: 1, alignItems: "flex-start" },
-  infoText: { fontSize: 13, fontFamily: "Inter_400Regular", flex: 1, lineHeight: 19 },
-  buttons: { gap: 12, paddingBottom: 8 },
-  copyBtn: { height: 52, borderRadius: 14, borderWidth: 1.5, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 },
-  copyText: { fontSize: 15, fontFamily: "Inter_600SemiBold" },
-  continueBtn: { height: 56, borderRadius: 16, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10 },
-  continueText: { fontSize: 16, fontFamily: "Inter_700Bold", color: "#fff" },
+  container: { flex: 1, backgroundColor: "#000", paddingHorizontal: 24 },
+  logo: { width: 175, height: 92, alignSelf: "center" },
+  content: { flex: 1, alignItems: "center", justifyContent: "center", gap: 18 },
+  successWrap: { marginBottom: 2 },
+  successGlow: { width: 104, height: 104, borderRadius: 52, backgroundColor: "rgba(34,197,94,0.14)", alignItems: "center", justifyContent: "center" },
+  successCircle: { width: 70, height: 70, borderRadius: 35, backgroundColor: "#22C55E", alignItems: "center", justifyContent: "center", shadowColor: "#22C55E", shadowOpacity: 0.8, shadowRadius: 20 },
+  title: { color: "#FFFFFF", fontSize: 21, fontFamily: "Inter_700Bold", textAlign: "center" },
+  subtitle: { color: "#A6A6A6", fontSize: 13, fontFamily: "Inter_400Regular", textAlign: "center", lineHeight: 19, marginTop: 5, marginBottom: 14 },
+  card: { width: "100%", borderRadius: 12, borderWidth: 1, borderColor: "#242424", backgroundColor: "rgba(14,14,14,0.96)", padding: 14, gap: 10 },
+  row: { gap: 4 },
+  rowLabel: { color: "#8F8F8F", fontSize: 11, fontFamily: "Inter_600SemiBold", letterSpacing: 0.8, textTransform: "uppercase" },
+  rowValue: { color: "#FFFFFF", fontSize: 15, fontFamily: "Inter_700Bold" },
+  divider: { height: 1, backgroundColor: "#252525" },
+  idLabel: { color: "#8F8F8F", fontSize: 11, fontFamily: "Inter_600SemiBold", letterSpacing: 0.8, textAlign: "center" },
+  idBox: { borderRadius: 10, borderWidth: 1, borderColor: "rgba(255,107,0,0.45)", backgroundColor: "rgba(255,107,0,0.12)", paddingVertical: 10, alignItems: "center" },
+  idValue: { color: "#FF6B00", fontSize: 21, fontFamily: "Inter_700Bold", letterSpacing: 2 },
+  statusBox: { flexDirection: "row", alignItems: "center", gap: 10, borderRadius: 10, backgroundColor: "rgba(251,191,36,0.1)", borderWidth: 1, borderColor: "rgba(251,191,36,0.24)", padding: 10 },
+  statusDot: { width: 12, height: 12, borderRadius: 6, backgroundColor: "#FBBF24" },
+  statusTitle: { color: "#FBBF24", fontSize: 14, fontFamily: "Inter_700Bold" },
+  statusSub: { color: "#B7B7B7", fontSize: 12, fontFamily: "Inter_400Regular", lineHeight: 17, marginTop: 2 },
+  button: { height: 48, borderRadius: 10, backgroundColor: "#FF6B00", flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10 },
+  buttonText: { color: "#111", fontSize: 13, fontFamily: "Inter_700Bold" },
 });
+*/

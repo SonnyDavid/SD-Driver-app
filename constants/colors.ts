@@ -1,29 +1,29 @@
-const sdDark = {
+const sdCyan = {
   text: "#FFFFFF",
-  tint: "#FF6B00",
-  background: "#0A0A0F",
+  tint: "#14C8F3",
+  background: "#020304",
   foreground: "#FFFFFF",
-  card: "#14141E",
+  card: "#0A0D12",
   cardForeground: "#FFFFFF",
-  primary: "#FF6B00",
-  primaryForeground: "#FFFFFF",
-  secondary: "#1E1E2E",
+  primary: "#14C8F3",
+  primaryForeground: "#001018",
+  secondary: "#10151D",
   secondaryForeground: "#FFFFFF",
-  muted: "#252535",
-  mutedForeground: "#8A8A9A",
-  accent: "#FFA040",
-  accentForeground: "#0A0A0F",
-  destructive: "#EF4444",
+  muted: "#1F2A35",
+  mutedForeground: "#8A94A6",
+  accent: "#0899C8",
+  accentForeground: "#001018",
+  destructive: "#EF233C",
   destructiveForeground: "#FFFFFF",
-  border: "#252535",
-  input: "#1E1E2E",
-  success: "#22C55E",
+  border: "#1F2A35",
+  input: "#070B10",
+  success: "#17C964",
 };
 
 const colors = {
-  light: sdDark,
-  dark: sdDark,
-  radius: 14,
+  light: sdCyan,
+  dark: sdCyan,
+  radius: 12,
 };
 
 export default colors;

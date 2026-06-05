@@ -1,4 +1,7 @@
+export { LoginScreen as default } from "@/components/DriverFlowScreens";
+/*
 import { Feather } from "@expo/vector-icons";
+import { LinearGradient } from "expo-linear-gradient";
 import { router } from "expo-router";
 import React, { useState } from "react";
 import {
@@ -48,9 +51,11 @@ export default function LoginScreen() {
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
+      <LinearGradient colors={["#000000", "#080604", "#000000"]} style={StyleSheet.absoluteFill} />
+      <View style={styles.orangeGlow} />
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : "height"}>
         <ScrollView
-          contentContainerStyle={[styles.scroll, { paddingTop: topPad + 20, paddingBottom: bottomPad + 20 }]}
+          contentContainerStyle={[styles.scroll, { paddingTop: topPad + 10, paddingBottom: bottomPad + 16 }]}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
@@ -65,7 +70,7 @@ export default function LoginScreen() {
             Enter your Driver ID and password to continue
           </Text>
 
-          <View style={styles.form}>
+          <View style={styles.formCard}>
             <View style={styles.fieldGroup}>
               <Text style={[styles.label, { color: colors.mutedForeground }]}>Driver ID</Text>
               <View style={[styles.inputRow, { backgroundColor: colors.input, borderColor: driverId ? colors.primary : colors.border }]}>
@@ -138,21 +143,22 @@ export default function LoginScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  scroll: { flexGrow: 1, paddingHorizontal: 24 },
-  backBtn: { marginBottom: 24, width: 40 },
-  logo: { width: 180, height: 180, marginBottom: 16, alignSelf: "center" },
-  title: { fontSize: 28, fontFamily: "Inter_700Bold", marginBottom: 8 },
-  subtitle: { fontSize: 14, fontFamily: "Inter_400Regular", lineHeight: 20, marginBottom: 36 },
-  form: { gap: 16 },
-  fieldGroup: { gap: 8 },
+  orangeGlow: { position: "absolute", left: 36, right: 36, top: 120, height: 180, borderRadius: 90, backgroundColor: "#FF6B00", opacity: 0.08 },
+  scroll: { flexGrow: 1, paddingHorizontal: 22 },
+  backBtn: { marginBottom: 8, width: 40 },
+  logo: { width: 150, height: 130, marginBottom: 8, alignSelf: "center" },
+  title: { fontSize: 24, fontFamily: "Inter_700Bold", marginBottom: 5, textAlign: "center" },
+  subtitle: { fontSize: 13, fontFamily: "Inter_400Regular", lineHeight: 18, marginBottom: 18, textAlign: "center" },
+  formCard: { gap: 12, borderWidth: 1, borderColor: "#202020", backgroundColor: "rgba(15,15,15,0.96)", borderRadius: 10, padding: 12 },
+  fieldGroup: { gap: 6 },
   label: { fontSize: 12, fontFamily: "Inter_600SemiBold", textTransform: "uppercase", letterSpacing: 1 },
   inputRow: {
     flexDirection: "row",
     alignItems: "center",
-    borderRadius: 14,
-    borderWidth: 1.5,
-    height: 54,
-    paddingHorizontal: 16,
+    borderRadius: 8,
+    borderWidth: 1,
+    height: 48,
+    paddingHorizontal: 14,
   },
   inputIcon: { marginRight: 12 },
   input: { flex: 1, fontSize: 15, fontFamily: "Inter_400Regular" },
@@ -161,20 +167,21 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    padding: 14,
-    borderRadius: 12,
+    padding: 11,
+    borderRadius: 8,
     borderWidth: 1,
   },
   errorText: { fontSize: 13, fontFamily: "Inter_500Medium", flex: 1 },
   submitBtn: {
-    height: 56,
-    borderRadius: 16,
+    height: 48,
+    borderRadius: 8,
     alignItems: "center",
     justifyContent: "center",
     marginTop: 8,
   },
-  submitText: { fontSize: 16, fontFamily: "Inter_700Bold", color: "#fff", letterSpacing: 1 },
-  footer: { flexDirection: "row", justifyContent: "center", marginTop: 32 },
+  submitText: { fontSize: 14, fontFamily: "Inter_700Bold", color: "#111", letterSpacing: 1 },
+  footer: { flexDirection: "row", justifyContent: "center", marginTop: 22 },
   footerText: { fontSize: 14, fontFamily: "Inter_400Regular" },
   footerLink: { fontSize: 14, fontFamily: "Inter_600SemiBold" },
 });
+*/

@@ -14,10 +14,20 @@
       "backgroundColor": "#0A0A0F"
     },
     "ios": {
-      "supportsTablet": false
+      "supportsTablet": false,
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "remote-notification",
+          "audio"
+        ]
+      }
     },
     "android": {
-      "backgroundColor": "#0A0A0F"
+      "backgroundColor": "#0A0A0F",
+      "permissions": [
+        "android.permission.VIBRATE",
+        "android.permission.POST_NOTIFICATIONS"
+      ]
     },
     "web": {
       "favicon": "./assets/images/icon.png"
@@ -30,7 +40,17 @@
         }
       ],
       "expo-font",
-      "expo-web-browser"
+      "expo-web-browser",
+      [
+        "expo-notifications",
+        {
+          "sounds": [
+            "./assets/sounds/new-order.wav"
+          ],
+          "icon": "./assets/images/icon.png",
+          "color": "#14C8F3"
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": false,

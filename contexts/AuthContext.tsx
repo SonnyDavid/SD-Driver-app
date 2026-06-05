@@ -2,9 +2,15 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
 
 import { supabase, DriverRow } from "@/lib/supabase";
+import {
+  isLocalPhotoUri,
+  isRemotePhotoUri,
+  uploadDriverProfilePhoto,
+} from "@/lib/driverProfilePhoto";
 
 export interface Driver {
   id: string;
+  driverId: string;
   name: string;
   email: string;
   phone: string;
@@ -12,6 +18,7 @@ export interface Driver {
   vehicleType: "car" | "van" | "motorcycle";
   vehicleRegistration: string;
   vehiclePhotoUri?: string;
+  profilePhotoUri?: string;
   status: "pending" | "verified" | "suspended";
   isOnline: boolean;
   createdAt: string;
@@ -24,7 +31,8 @@ export interface RegisterData {
   password: string;
   vehicleType: "car" | "van" | "motorcycle";
   vehicleRegistration: string;
-  vehiclePhotoUri: string;
+  vehiclePhotoUri?: string;
+  profilePhotoUri: string;
 }
 
 interface AuthContextValue {
@@ -38,6 +46,7 @@ interface AuthContextValue {
 }
 
 const CURRENT_DRIVER_KEY = "sd_current_driver_id";
+const profilePhotoKey = (driverId: string) => `sd_profile_photo_${driverId}`;
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 function generateDriverId(): string {
@@ -48,6 +57,7 @@ function generateDriverId(): string {
 function rowToDriver(row: DriverRow): Driver {
   return {
     id: row.id,
+    driverId: row.driver_id ?? row.id,
     name: row.name,
     email: row.email,
     phone: row.phone,
@@ -55,10 +65,41 @@ function rowToDriver(row: DriverRow): Driver {
     vehicleType: row.vehicle_type,
     vehicleRegistration: row.vehicle_registration,
     vehiclePhotoUri: row.vehicle_photo_uri ?? undefined,
+    profilePhotoUri: row.profile_photo_uri ?? undefined,
     status: row.status,
     isOnline: row.is_online,
     createdAt: row.created_at,
   };
+}
+
+async function resolveProfilePhotoUri(driverId: string, dbUri?: string | null): Promise<string | undefined> {
+  if (isRemotePhotoUri(dbUri)) return dbUri!;
+
+  const cached = await AsyncStorage.getItem(profilePhotoKey(driverId));
+  if (isRemotePhotoUri(cached)) return cached!;
+
+  const localUri =
+    (cached && isLocalPhotoUri(cached) ? cached : null) ||
+    (isLocalPhotoUri(dbUri) ? dbUri! : null);
+
+  if (localUri) {
+    try {
+      const remote = await uploadDriverProfilePhoto(driverId, localUri);
+      await AsyncStorage.setItem(profilePhotoKey(driverId), remote);
+      await supabase.from("drivers").update({ profile_photo_uri: remote }).eq("id", driverId);
+      return remote;
+    } catch {
+      return localUri;
+    }
+  }
+
+  return undefined;
+}
+
+async function hydrateDriver(row: DriverRow): Promise<Driver> {
+  const driver = rowToDriver(row);
+  driver.profilePhotoUri = await resolveProfilePhotoUri(row.id, row.profile_photo_uri);
+  return driver;
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -75,7 +116,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             .select("*")
             .eq("id", currentId)
             .single();
-          if (data) setDriver(rowToDriver(data as DriverRow));
+          if (data) setDriver(await hydrateDriver(data as DriverRow));
         }
       } catch {
       } finally {
@@ -86,18 +127,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const login = useCallback(async (driverId: string, password: string) => {
     const trimmedId = driverId.trim().toUpperCase();
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from("drivers")
       .select("*")
-      .eq("id", trimmedId)
-      .single();
+      .eq("driver_id", trimmedId)
+      .maybeSingle();
+
+    if (!data) {
+      const fallback = await supabase
+        .from("drivers")
+        .select("*")
+        .eq("id", trimmedId)
+        .maybeSingle();
+      data = fallback.data;
+      error = fallback.error;
+    }
 
     if (error || !data) return { success: false, error: "Driver ID not found. Please check and try again." };
     const row = data as DriverRow;
     if (row.password_hash !== password) return { success: false, error: "Incorrect password. Please try again." };
+    if (row.status === "pending") {
+      return { success: false, error: "Your account is awaiting admin approval." };
+    }
+    if (row.status === "suspended") {
+      return { success: false, error: "Your account has been suspended. Contact support." };
+    }
 
-    await AsyncStorage.setItem(CURRENT_DRIVER_KEY, trimmedId);
-    setDriver(rowToDriver(row));
+    await AsyncStorage.setItem(CURRENT_DRIVER_KEY, row.id);
+    setDriver(await hydrateDriver(row));
     return { success: true };
   }, []);
 
@@ -115,13 +172,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     let driverId = generateDriverId();
     let taken = true;
     while (taken) {
-      const { data: check } = await supabase.from("drivers").select("id").eq("id", driverId).maybeSingle();
+      const { data: check } = await supabase
+        .from("drivers")
+        .select("id")
+        .or(`driver_id.eq.${driverId},id.eq.${driverId}`)
+        .maybeSingle();
       taken = !!check;
       if (taken) driverId = generateDriverId();
     }
 
-    const { error } = await supabase.from("drivers").insert({
+    let profilePhotoUri: string | null = null;
+    if (data.profilePhotoUri) {
+      try {
+        profilePhotoUri = await uploadDriverProfilePhoto(driverId, data.profilePhotoUri);
+      } catch {
+        profilePhotoUri = data.profilePhotoUri;
+      }
+      await AsyncStorage.setItem(profilePhotoKey(driverId), profilePhotoUri);
+    }
+
+    const insertPayload = {
       id: driverId,
+      driver_id: driverId,
       name: data.name.trim(),
       email: data.email.trim().toLowerCase(),
       phone: data.phone.trim(),
@@ -129,33 +201,71 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       vehicle_type: data.vehicleType,
       vehicle_registration: data.vehicleRegistration.trim().toUpperCase(),
       vehicle_photo_uri: data.vehiclePhotoUri || null,
-      status: "pending",
+      profile_photo_uri: profilePhotoUri,
+      status: "pending" as const,
       is_online: false,
-    });
+    };
+
+    let { error } = await supabase.from("drivers").insert(insertPayload);
+    if (error?.message?.includes("profile_photo_uri")) {
+      const { profile_photo_uri: _ignored, ...withoutProfile } = insertPayload;
+      ({ error } = await supabase.from("drivers").insert(withoutProfile));
+    }
 
     if (error) return { success: false, error: error.message };
+
     return { success: true, driverId };
   }, []);
 
   const logout = useCallback(async () => {
-    if (driver) {
-      await supabase.from("drivers").update({ is_online: false }).eq("id", driver.id);
-    }
-    await AsyncStorage.removeItem(CURRENT_DRIVER_KEY);
+    const driverId = driver?.id;
+
     setDriver(null);
+
+    try {
+      await AsyncStorage.multiRemove([
+        CURRENT_DRIVER_KEY,
+        "sd_current_order_id",
+      ]);
+    } catch (error) {
+      console.warn("Failed to clear local session storage during logout", error);
+    }
+
+    try {
+      await supabase.auth.signOut();
+    } catch {
+      // Driver auth is local-session based; Supabase auth sign-out is best-effort.
+    }
+
+    if (driverId) {
+      void supabase
+        .from("drivers")
+        .update({ is_online: false })
+        .eq("id", driverId)
+        .then(() => {})
+        .catch(() => {});
+    }
   }, [driver]);
 
   const updateDriver = useCallback(async (updates: Partial<Driver>) => {
     if (!driver) return;
+    setDriver((prev) => (prev ? { ...prev, ...updates } : null));
+
     const dbUpdates: Record<string, unknown> = {};
     if (updates.name !== undefined) dbUpdates.name = updates.name;
     if (updates.email !== undefined) dbUpdates.email = updates.email;
     if (updates.phone !== undefined) dbUpdates.phone = updates.phone;
     if (updates.status !== undefined) dbUpdates.status = updates.status;
     if (updates.isOnline !== undefined) dbUpdates.is_online = updates.isOnline;
+    if (updates.profilePhotoUri !== undefined) dbUpdates.profile_photo_uri = updates.profilePhotoUri || null;
 
-    await supabase.from("drivers").update(dbUpdates).eq("id", driver.id);
-    setDriver((prev) => (prev ? { ...prev, ...updates } : null));
+    if (Object.keys(dbUpdates).length === 0) return;
+
+    try {
+      await supabase.from("drivers").update(dbUpdates).eq("id", driver.id);
+    } catch {
+      // Keep local profile updates even when Supabase is unavailable.
+    }
   }, [driver]);
 
   const setOnline = useCallback(async (online: boolean) => {

@@ -15,10 +15,13 @@ create table if not exists public.drivers (
   vehicle_type         text not null check (vehicle_type in ('car','van','motorcycle')),
   vehicle_registration text not null,
   vehicle_photo_uri    text,
+  profile_photo_uri    text,
   status               text not null default 'pending' check (status in ('pending','verified','suspended')),
   is_online            boolean not null default false,
   created_at           timestamptz not null default now()
 );
+
+alter table public.drivers add column if not exists profile_photo_uri text;
 
 alter table public.drivers enable row level security;
 
@@ -96,3 +99,49 @@ end $$;
 -- ─────────────────────────────────────────────
 
 on conflict (id) do nothing;
+
+-- ─────────────────────────────────────────────
+-- DRIVER PROFILE PHOTOS (Storage)
+-- ─────────────────────────────────────────────
+insert into storage.buckets (id, name, public)
+values ('driver-profiles', 'driver-profiles', true)
+on conflict (id) do update set public = true;
+
+drop policy if exists "driver_profiles_public_read" on storage.objects;
+create policy "driver_profiles_public_read"
+  on storage.objects for select
+  using (bucket_id = 'driver-profiles');
+
+drop policy if exists "driver_profiles_upload" on storage.objects;
+create policy "driver_profiles_upload"
+  on storage.objects for insert
+  with check (bucket_id = 'driver-profiles');
+
+drop policy if exists "driver_profiles_update" on storage.objects;
+create policy "driver_profiles_update"
+  on storage.objects for update
+  using (bucket_id = 'driver-profiles')
+  with check (bucket_id = 'driver-profiles');
+
+-- ─────────────────────────────────────────────
+-- DELIVERY PHOTOS (Storage)
+-- ─────────────────────────────────────────────
+insert into storage.buckets (id, name, public)
+values ('delivery-photos', 'delivery-photos', true)
+on conflict (id) do update set public = true, name = excluded.name;
+
+drop policy if exists "delivery_photos_public_read" on storage.objects;
+create policy "delivery_photos_public_read"
+  on storage.objects for select
+  using (bucket_id = 'delivery-photos');
+
+drop policy if exists "delivery_photos_upload" on storage.objects;
+create policy "delivery_photos_upload"
+  on storage.objects for insert
+  with check (bucket_id = 'delivery-photos');
+
+drop policy if exists "delivery_photos_update" on storage.objects;
+create policy "delivery_photos_update"
+  on storage.objects for update
+  using (bucket_id = 'delivery-photos')
+  with check (bucket_id = 'delivery-photos');
