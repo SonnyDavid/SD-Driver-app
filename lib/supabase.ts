@@ -71,6 +71,7 @@ export interface OrderRow {
   delivery_lat: number;
   delivery_lng: number;
   payout: number;
+  delivery_type?: string | null;
   package_type: string;
   customer_phone: string;
   recipient_phone: string;
@@ -85,6 +86,10 @@ export interface OrderRow {
   delivery_proof_photo_url?: string | null;
   completed_at?: string | null;
   delivered_at?: string | null;
+  current_stage?: string | null;
+  driver_status?: string | null;
+  pin_verified?: boolean | null;
+  pin_verified_at?: string | null;
   pin: string;
   status: string;
   driver_id: string | null;

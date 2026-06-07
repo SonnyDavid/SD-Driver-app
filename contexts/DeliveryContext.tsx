@@ -15,15 +15,22 @@ import {
   logCompleteDelivery,
   supabaseErrorMessage,
 } from "@/lib/completeDeliveryLog";
-import { getDriverOrderNumber, resolvePublicOrderNumber } from "@/lib/orderDisplay";
-import { mapAppStatusToDb, mapDbStatusToApp, type AppOrderStatus } from "@/lib/orderStatus";
-import { appendLocalCompletedDelivery, loadLocalCompletedDeliveries } from "@/lib/localCompletedDeliveries";
-import { notifyNewOrder } from "@/lib/orderNotifications";
 import {
-  supabase,
-  OrderRow,
-  DeliveryRow,
-} from "../lib/supabase";
+  getDriverOrderNumber,
+  resolvePublicOrderNumber,
+} from "@/lib/orderDisplay";
+import {
+  syncOrderLifecycle,
+  type OrderLifecycleEvent,
+} from "@/lib/orderLifecycle";
+import {
+  mapAppStatusToDb,
+  mapDbStatusToApp,
+  resolveAppStatusFromRow,
+  type AppOrderStatus,
+} from "@/lib/orderStatus";
+import { notifyNewOrder } from "@/lib/orderNotifications";
+import { supabase, OrderRow } from "../lib/supabase";
 import { useAuth } from "./AuthContext";
 
 const CURRENT_ORDER_KEY = "sd_current_order_id";
@@ -39,6 +46,10 @@ type Order = {
   distance: string;
   payout: number;
   packageType: string;
+  /** ISO timestamp from `orders.created_at` — used for queue age display. */
+  createdAt?: string;
+  /** Service tier from `orders.delivery_type` (Priority / Standard / Scheduled). */
+  deliveryType?: string | null;
   customerPhone: string;
   recipientName?: string;
   recipientPhone?: string;
@@ -118,6 +129,13 @@ type DeliveryContextType = {
     status: Order["status"]
   ) => Promise<void>;
 
+  /** Write a driver lifecycle event to `orders` (DB source of truth). */
+  recordOrderEvent: (
+    orderId: string,
+    event: OrderLifecycleEvent,
+    extra?: Record<string, unknown>
+  ) => Promise<void>;
+
   completeDelivery: (
     order: Order,
     deliveryPhotoUrl: string
@@ -157,6 +175,8 @@ function rowToOrder(row: OrderRow): Order {
     distance: row.distance,
     payout: Number(row.payout),
     packageType: row.package_type,
+    createdAt: row.created_at,
+    deliveryType: row.delivery_type ?? null,
     customerPhone: row.recipient_phone,
     recipientPhone: row.recipient_phone,
     recipientName: row.recipient_name,
@@ -167,10 +187,46 @@ function rowToOrder(row: OrderRow): Order {
     senderName: row.sender_name || row.recipient_name,
     senderPhone: row.sender_phone || row.recipient_phone || row.customer_phone,
     pin: row.delivery_confirmation_pin ?? row.pin,
-    status: mapDbStatusToApp(row.status),
+    status: resolveAppStatusFromRow(row),
     driverId: row.driver_id,
     completedAt: row.completed_at ?? null,
   };
+}
+
+const APP_STATUS_TO_LIFECYCLE: Partial<
+  Record<Order["status"], OrderLifecycleEvent>
+> = {
+  package_collected: "collected",
+  en_route: "en_route",
+  arriving: "arriving",
+  delivered: "delivered",
+};
+
+const LIFECYCLE_TO_APP: Record<OrderLifecycleEvent, AppOrderStatus> = {
+  accepted: "driver_assigned",
+  heading_to_pickup: "driver_assigned",
+  arrived_pickup: "driver_assigned",
+  collected: "package_collected",
+  en_route: "en_route",
+  arriving: "arriving",
+  pin_verified: "arriving",
+  delivered: "delivered",
+};
+
+function applyOrderRowToMyDeliveries(
+  row: OrderRow,
+  setMyDeliveries: React.Dispatch<React.SetStateAction<Order[]>>
+) {
+  const order = rowToOrder(row);
+  if (row.completed_at) {
+    setMyDeliveries((prev) => prev.filter((d) => d.id !== order.id));
+    return;
+  }
+  setMyDeliveries((prev) => {
+    const exists = prev.some((d) => d.id === order.id);
+    if (!exists) return [order, ...prev];
+    return prev.map((d) => (d.id === order.id ? order : d));
+  });
 }
 
 function parseDistanceNumeric(distance: string | number | null | undefined): number {
@@ -182,64 +238,64 @@ function parseDistanceNumeric(distance: string | number | null | undefined): num
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function buildCompletedDeliveryFromOrder(
-  order: Order,
-  deliveryId: string,
-  completedAt: string
-): CompletedDelivery {
-  const durationMinutes = Math.floor(15 + Math.random() * 20);
-  const route = `${order.pickupAddress} → ${order.deliveryAddress}`;
-  return {
-    id: deliveryId,
-    orderId: order.id,
-    orderNumber: order.orderNumber,
-    packageId: order.packageId,
-    recipientName: order.recipientName,
-    date: new Date(completedAt).toLocaleString(),
-    pickupAddress: order.pickupAddress,
-    deliveryAddress: order.deliveryAddress,
-    distance: String(order.distance ?? ""),
-    amount: Number(order.payout || 0),
-    durationMinutes,
-    route,
-  };
+function toIso8601(value: string | null | undefined): string {
+  if (!value) return new Date().toISOString();
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? new Date().toISOString() : parsed.toISOString();
 }
 
-function rowToDelivery(row: DeliveryRow): CompletedDelivery {
-  const payout = Number(row.payout ?? row.price ?? 0);
+function rowToCompletedDelivery(row: OrderRow): CompletedDelivery {
+  const completedAt = row.completed_at ?? row.delivered_at ?? row.created_at;
   const route = `${row.pickup_address ?? ""} → ${row.delivery_address ?? ""}`;
   return {
     id: row.id,
-    orderId: row.order_id,
-    orderNumber: undefined,
+    orderId: row.id,
+    orderNumber: resolvePublicOrderNumber(row.order_id, row.package_id),
     packageId: row.package_id ?? undefined,
-    recipientName: row.recipient_name ?? undefined,
-    date: row.created_at
-      ? new Date(row.created_at).toLocaleString()
-      : new Date().toLocaleString(),
-    pickupAddress: row.pickup_address ?? "",
-    deliveryAddress: row.delivery_address ?? "",
+    recipientName: row.recipient_name,
+    date: toIso8601(completedAt),
+    pickupAddress: row.pickup_address,
+    deliveryAddress: row.delivery_address,
     distance: String(row.distance ?? ""),
-    amount: payout,
+    amount: Number(row.payout || 0),
     durationMinutes: 0,
     route,
   };
 }
 
+function buildCompletedDeliveryFromOrder(
+  order: Order,
+  completedAt: string
+): CompletedDelivery {
+  const route = `${order.pickupAddress} → ${order.deliveryAddress}`;
+  return {
+    id: order.id,
+    orderId: order.id,
+    orderNumber: order.orderNumber,
+    packageId: order.packageId,
+    recipientName: order.recipientName,
+    date: toIso8601(completedAt),
+    pickupAddress: order.pickupAddress,
+    deliveryAddress: order.deliveryAddress,
+    distance: String(order.distance ?? ""),
+    amount: Number(order.payout || 0),
+    durationMinutes: 0,
+    route,
+  };
+}
+
+function isCompletedOnOrAfter(isoDate: string, start: Date): boolean {
+  const timestamp = Date.parse(isoDate);
+  if (Number.isNaN(timestamp)) return false;
+  return timestamp >= start.getTime();
+}
+
 function applyCompletedDeliveryState(
   order: Order,
-  completed: CompletedDelivery,
-  setCompletedDeliveries: React.Dispatch<React.SetStateAction<CompletedDelivery[]>>,
   setMyDeliveries: React.Dispatch<React.SetStateAction<Order[]>>,
   currentOrderId: string | null,
   setCurrentOrderId: React.Dispatch<React.SetStateAction<string | null>>
 ) {
-  setCompletedDeliveries((prev) => {
-    const next = [completed, ...prev.filter((d) => d.orderId !== order.id)];
-    void appendLocalCompletedDelivery(completed);
-    return next;
-  });
-
   setMyDeliveries((prev) => prev.filter((delivery) => delivery.id !== order.id));
 
   if (currentOrderId === order.id) {
@@ -407,11 +463,26 @@ export function DeliveryProvider({
     setIsLoadingOrders(false);
   }, [acceptedOrderIds, alertForNewOrder, dismissedOrderIds]);
 
+  const fetchCompletedDeliveries = useCallback(async () => {
+    if (!driver) {
+      setCompletedDeliveries([]);
+      return;
+    }
+
+    const { data: orderRows } = await supabase
+      .from("orders")
+      .select("*")
+      .eq("driver_id", driver.id)
+      .not("completed_at", "is", null)
+      .order("completed_at", { ascending: false });
+
+    setCompletedDeliveries(
+      orderRows ? (orderRows as OrderRow[]).map(rowToCompletedDelivery) : []
+    );
+  }, [driver]);
+
   const fetchMyDeliveries = useCallback(async () => {
     if (!driver) return;
-
-    const localCompleted = await loadLocalCompletedDeliveries();
-    const locallyCompletedIds = new Set(localCompleted.map((d) => d.orderId));
 
     const { data: orderRows } = await supabase
       .from("orders")
@@ -422,9 +493,7 @@ export function DeliveryProvider({
       .order("created_at", { ascending: false });
 
     if (orderRows) {
-      const rows = (orderRows as OrderRow[])
-        .map(rowToOrder)
-        .filter((order) => !locallyCompletedIds.has(order.id));
+      const rows = (orderRows as OrderRow[]).map(rowToOrder);
       setMyDeliveries(rows);
       setAcceptedOrderIds((prev) => {
         const next = new Set(prev);
@@ -433,58 +502,8 @@ export function DeliveryProvider({
       });
     }
 
-    const { data: deliveryRows } = await supabase
-      .from("deliveries")
-      .select("*")
-      .eq("driver_id", driver.id)
-      .eq("status", "delivered")
-      .order("created_at", { ascending: false });
-
-    if (deliveryRows?.length) {
-      const rows = deliveryRows as DeliveryRow[];
-      const linkedOrderIds = [
-        ...new Set(rows.map((r) => r.order_id).filter((id): id is string => !!id)),
-      ];
-      const publicNumberByOrderUuid = new Map<string, string>();
-
-      if (linkedOrderIds.length) {
-        const { data: orderMeta } = await supabase
-          .from("orders")
-          .select("id, order_id, package_id")
-          .in("id", linkedOrderIds);
-
-        for (const meta of orderMeta ?? []) {
-          const label = resolvePublicOrderNumber(meta.order_id, meta.package_id);
-          if (label) publicNumberByOrderUuid.set(meta.id, label);
-        }
-      }
-
-      setCompletedDeliveries((prev) => {
-        const remote = rows.map((row) => {
-          const completed = rowToDelivery(row);
-          completed.orderNumber =
-            publicNumberByOrderUuid.get(row.order_id) ?? completed.orderNumber;
-          return completed;
-        });
-        const seen = new Set(prev.map((d) => d.orderId));
-        return [...prev, ...remote.filter((d) => !seen.has(d.orderId))];
-      });
-    }
-  }, [driver]);
-
-  useEffect(() => {
-    let active = true;
-    loadLocalCompletedDeliveries().then((local) => {
-      if (!active || !local.length) return;
-      setCompletedDeliveries((prev) => {
-        const seen = new Set(prev.map((d) => d.orderId));
-        return [...local.filter((d) => !seen.has(d.orderId)), ...prev];
-      });
-    });
-    return () => {
-      active = false;
-    };
-  }, []);
+    await fetchCompletedDeliveries();
+  }, [driver, fetchCompletedDeliveries]);
 
   useEffect(() => {
     if (!driver) return;
@@ -494,6 +513,12 @@ export function DeliveryProvider({
   useEffect(() => {
     if (!driver) return;
     fetchMyDeliveries();
+
+    const poll = setInterval(() => {
+      void fetchMyDeliveries();
+    }, 2000);
+
+    return () => clearInterval(poll);
   }, [driver, fetchMyDeliveries]);
 
   useEffect(() => {
@@ -526,6 +551,32 @@ export function DeliveryProvider({
       supabase.removeChannel(channel);
     };
   }, [driver?.id, driver?.isOnline, registerIncomingOrder]);
+
+  useEffect(() => {
+    if (!driver) return;
+
+    const channel = supabase
+      .channel(`driver-active-${driver.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "orders",
+          filter: `driver_id=eq.${driver.id}`,
+        },
+        (payload) => {
+          const row = (payload.new ?? payload.old) as OrderRow | undefined;
+          if (!row?.id) return;
+          applyOrderRowToMyDeliveries(row, setMyDeliveries);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [driver?.id]);
 
   useEffect(() => {
     if (!driver?.isOnline) return;
@@ -628,36 +679,51 @@ export function DeliveryProvider({
     []
   );
 
+  const recordOrderEvent = useCallback(
+    async (
+      orderId: string,
+      event: OrderLifecycleEvent,
+      extra?: Record<string, unknown>
+    ) => {
+      await syncOrderLifecycle(orderId, event, extra);
+
+      const appStatus = LIFECYCLE_TO_APP[event];
+      setMyDeliveries((prev) =>
+        prev.map((delivery) =>
+          delivery.id === orderId ? { ...delivery, status: appStatus } : delivery
+        )
+      );
+    },
+    []
+  );
+
   const acceptOrder = useCallback(
     async (order: Order) => {
+      if (!driver) return false;
+
+      try {
+        await syncOrderLifecycle(order.id, "accepted", {
+          driver_id: driver.id,
+          assigned_driver_id: driver.id,
+          is_assigned: true,
+        });
+      } catch (error) {
+        console.error("acceptOrder failed:", error);
+        return false;
+      }
+
       const accepted: Order = {
         ...order,
         status: "driver_assigned",
-        driverId: driver?.id ?? null,
+        driverId: driver.id,
       };
 
-      setAcceptedOrderIds((prev) =>
-        new Set(prev).add(order.id)
-      );
-
-      setIncomingOrders((prev) =>
-        prev.filter((o) => o.id !== order.id)
-      );
-
+      setAcceptedOrderIds((prev) => new Set(prev).add(order.id));
+      setIncomingOrders((prev) => prev.filter((o) => o.id !== order.id));
       setMyDeliveries((prev) => [
         accepted,
         ...prev.filter((o) => o.id !== order.id),
       ]);
-
-      if (driver) {
-      await supabase
-        .from("orders")
-        .update({
-          status: "accepted",
-          driver_id: driver.id,
-        })
-        .eq("id", order.id);
-      }
 
       return true;
     },
@@ -678,44 +744,36 @@ export function DeliveryProvider({
 
   const startDelivery = useCallback(
     async (orderId: string) => {
-      const order = myDeliveries.find(
-        (o) => o.id === orderId
-      );
-      if (!order || order.status !== "driver_assigned") {
+      setCurrentOrderId(orderId);
+      await AsyncStorage.setItem(CURRENT_ORDER_KEY, orderId);
+    },
+    []
+  );
+
+  const updateDeliveryStatus = useCallback(
+    async (orderId: string, status: Order["status"]) => {
+      const event = APP_STATUS_TO_LIFECYCLE[status];
+      if (event) {
+        await recordOrderEvent(orderId, event);
         return;
       }
 
-      setCurrentOrderId(orderId);
-      await AsyncStorage.setItem(
-        CURRENT_ORDER_KEY,
-        orderId
+      const dbStatus = mapAppStatusToDb(status);
+      const { error } = await supabase
+        .from("orders")
+        .update({ status: dbStatus, updated_at: new Date().toISOString() })
+        .eq("id", orderId);
+
+      if (error) throw new Error(error.message);
+
+      setMyDeliveries((prev) =>
+        prev.map((delivery) =>
+          delivery.id === orderId ? { ...delivery, status } : delivery
+        )
       );
     },
-    [myDeliveries]
+    [recordOrderEvent]
   );
-
-  const updateDeliveryStatus =
-    useCallback(
-      async (
-        orderId: string,
-        status: Order["status"]
-      ) => {
-        const dbStatus = mapAppStatusToDb(status);
-        await supabase
-          .from("orders")
-          .update({ status: dbStatus })
-          .eq("id", orderId);
-
-        setMyDeliveries((prev) =>
-          prev.map((delivery) =>
-            delivery.id === orderId
-              ? { ...delivery, status }
-              : delivery
-          )
-        );
-      },
-      []
-    );
 
   const completeDelivery = useCallback(
     async (
@@ -740,29 +798,29 @@ export function DeliveryProvider({
         delivery_proof_photo_url: deliveryPhotoUrl,
       });
 
-      const orderUpdate: Record<string, unknown> = {
+      logCompleteDelivery("update_order_completion", {
+        orderId: order.id,
         delivery_photo_url: deliveryPhotoUrl,
-        delivery_proof_photo_url: deliveryPhotoUrl,
-        completed_at: completedAt,
-        delivered_at: completedAt,
-      };
+      });
 
-      logCompleteDelivery("update_completed_at", { completed_at: completedAt });
-
-      const { error: orderError } = await supabase
-        .from("orders")
-        .update(orderUpdate)
-        .eq("id", order.id);
-
-      if (orderError) {
-        const message = orderError.message || "Failed to save delivery proof on order.";
+      try {
+        await syncOrderLifecycle(order.id, "delivered", {
+          delivery_photo_url: deliveryPhotoUrl,
+          delivery_proof_photo_url: deliveryPhotoUrl,
+          completed_at: completedAt,
+          delivered_at: completedAt,
+          pin_verified: true,
+          pin_verified_at: completedAt,
+        });
+        logCompleteDelivery("update_order_ok", { orderId: order.id });
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Failed to save delivery proof on order.";
         logCompleteDelivery("update_order_failed", message);
         throw new Error(message);
       }
-
-      logCompleteDelivery("update_order_ok", { orderId: order.id });
-
-      let completed: CompletedDelivery;
 
       const deliveryInsert = {
         id: deliveryId,
@@ -790,30 +848,26 @@ export function DeliveryProvider({
       if (deliveryError) {
         const message = supabaseErrorMessage(deliveryError);
         logCompleteDelivery("create_delivery_record_failed", message);
-        completed = buildCompletedDeliveryFromOrder(order, deliveryId, completedAt);
-        logCompleteDelivery("using_local_completion", {
+        logCompleteDelivery("using_order_completion", {
           reason: "Order already saved; delivery record is optional.",
         });
       } else {
         logCompleteDelivery("create_delivery_record_ok", { deliveryId: data?.id });
-        completed = rowToDelivery(data as DeliveryRow);
-        completed.durationMinutes = Math.floor(15 + Math.random() * 20);
-        completed.route = `${order.pickupAddress} → ${order.deliveryAddress}`;
       }
 
       applyCompletedDeliveryState(
         order,
-        completed,
-        setCompletedDeliveries,
         setMyDeliveries,
         currentOrderId,
         setCurrentOrderId
       );
+      await fetchCompletedDeliveries();
 
+      const completed = buildCompletedDeliveryFromOrder(order, completedAt);
       logCompleteDelivery("complete", { orderId: order.id, deliveryId: completed.id });
       return completed;
     },
-    [currentOrderId, driver]
+    [currentOrderId, driver, fetchCompletedDeliveries]
   );
 
   const completeDeliveryLocal = useCallback(
@@ -832,12 +886,6 @@ export function DeliveryProvider({
         durationMinutes: Math.floor(15 + Math.random() * 20),
         route: `${order.pickupAddress} → ${order.deliveryAddress}`,
       };
-
-      setCompletedDeliveries((prev) => {
-        const next = [completed, ...prev.filter((d) => d.orderId !== order.id)];
-        void appendLocalCompletedDelivery(completed);
-        return next;
-      });
 
       setMyDeliveries((prev) => prev.filter((delivery) => delivery.id !== order.id));
 
@@ -889,34 +937,17 @@ export function DeliveryProvider({
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
 
-  const todayEarnings =
-    completedDeliveries
-      .filter(
-        (d) =>
-          new Date(d.date) >=
-          todayStart
-      )
-      .reduce(
-        (sum, d) => sum + d.amount,
-        0
-      );
+  const todayEarnings = completedDeliveries
+    .filter((d) => isCompletedOnOrAfter(d.date, todayStart))
+    .reduce((sum, d) => sum + d.amount, 0);
 
   const weekStart = new Date();
-  weekStart.setDate(
-    weekStart.getDate() - 7
-  );
+  weekStart.setDate(weekStart.getDate() - 7);
+  weekStart.setHours(0, 0, 0, 0);
 
-  const weeklyEarnings =
-    completedDeliveries
-      .filter(
-        (d) =>
-          new Date(d.date) >=
-          weekStart
-      )
-      .reduce(
-        (sum, d) => sum + d.amount,
-        0
-      );
+  const weeklyEarnings = completedDeliveries
+    .filter((d) => isCompletedOnOrAfter(d.date, weekStart))
+    .reduce((sum, d) => sum + d.amount, 0);
 
   const availableBalance = completedDeliveries.reduce(
     (sum, d) => sum + d.amount,
@@ -943,6 +974,7 @@ export function DeliveryProvider({
         startDelivery,
 
         updateDeliveryStatus,
+        recordOrderEvent,
         completeDelivery,
         completeDeliveryLocal,
         cancelActiveDelivery,

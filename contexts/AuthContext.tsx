@@ -242,8 +242,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         .from("drivers")
         .update({ is_online: false })
         .eq("id", driverId)
-        .then(() => {})
-        .catch(() => {});
+        .then(
+          () => undefined,
+          () => undefined
+        );
     }
   }, [driver]);
 

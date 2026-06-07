@@ -135,7 +135,8 @@ export function IncomingOrderNotifier() {
   const topInset = Platform.OS === "web" ? 41 : insets.top;
 
   const online = !!driver?.isOnline;
-  const showPopup = !!driver && !!incoming && online;
+  const hasActiveDeliveries = myDeliveries.length > 0;
+  const showPopup = !!driver && !!incoming && online && !hasActiveDeliveries;
   const activeIncomingId = showPopup ? incoming.id : null;
 
   React.useEffect(() => {

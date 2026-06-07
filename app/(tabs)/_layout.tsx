@@ -68,7 +68,7 @@ export default function TabLayout() {
         options={{
           title: "Earnings",
           tabBarIcon: ({ color }) => (
-            <MaterialCommunityIcons name="currency-gbp-circle-outline" size={20} color={color} />
+            <MaterialCommunityIcons name="currency-gbp" size={20} color={color} />
           ),
         }}
       />
