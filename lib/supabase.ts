@@ -64,12 +64,17 @@ export interface OrderRow {
   /** Public order number shown to drivers (e.g. SD-ORD-10007). */
   order_id?: string | null;
   pickup_address: string;
+  pickup_postcode?: string | null;
+  pickup_zone?: string | null;
   delivery_address: string;
+  delivery_postcode?: string | null;
+  delivery_zone?: string | null;
   distance: string;
-  pickup_lat: number;
-  pickup_lng: number;
-  delivery_lat: number;
-  delivery_lng: number;
+  /** Not present on live `orders` table — reserved for future coordinate columns. */
+  pickup_lat?: number | null;
+  pickup_lng?: number | null;
+  delivery_lat?: number | null;
+  delivery_lng?: number | null;
   payout: number;
   delivery_type?: string | null;
   package_type: string;

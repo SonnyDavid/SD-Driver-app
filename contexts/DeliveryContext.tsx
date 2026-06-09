@@ -29,20 +29,25 @@ import {
   resolveAppStatusFromRow,
   type AppOrderStatus,
 } from "@/lib/orderStatus";
-import { notifyNewOrder } from "@/lib/orderNotifications";
+import { initOrderNotifications, notifyNewOrder } from "@/lib/orderNotifications";
 import { supabase, OrderRow } from "../lib/supabase";
 import { useAuth } from "./AuthContext";
 
 const CURRENT_ORDER_KEY = "sd_current_order_id";
 
+/** How long before a rejected popup order can be offered again (ms). */
+export const POPUP_REJECT_COOLDOWN_MS = 5 * 60 * 1000;
+
 type Order = {
   id: string;
   pickupAddress: string;
+  pickupPostcode?: string;
   deliveryAddress: string;
-  pickupLat: number;
-  pickupLng: number;
-  deliveryLat: number;
-  deliveryLng: number;
+  deliveryPostcode?: string;
+  pickupLat?: number;
+  pickupLng?: number;
+  deliveryLat?: number;
+  deliveryLng?: number;
   distance: string;
   payout: number;
   packageType: string;
@@ -86,10 +91,6 @@ function completedToOrder(delivery: CompletedDelivery): Order {
     id: delivery.orderId,
     pickupAddress: delivery.pickupAddress,
     deliveryAddress: delivery.deliveryAddress,
-    pickupLat: 0,
-    pickupLng: 0,
-    deliveryLat: 0,
-    deliveryLng: 0,
     distance: delivery.distance,
     payout: delivery.amount,
     packageType: "Parcel",
@@ -121,7 +122,12 @@ type DeliveryContextType = {
   setIsOnline: (value: boolean) => Promise<void>;
 
   acceptOrder: (order: Order) => Promise<boolean>;
+  /** Snooze popup for cooldown — order stays in Available Orders; Supabase unchanged. */
   rejectOrder: (orderId: string) => void;
+  /** Clear popup snooze (e.g. driver tapped a notification). */
+  clearPopupSnooze: (orderId: string) => void;
+  /** First incoming order eligible for the popup (not in reject cooldown). */
+  popupIncomingOrder: Order | null;
   startDelivery: (orderId: string) => Promise<void>;
 
   updateDeliveryStatus: (
@@ -159,6 +165,9 @@ type DeliveryContextType = {
   todayEarnings: number;
   weeklyEarnings: number;
   availableBalance: number;
+
+  /** Refetch active, incoming, and completed deliveries from Supabase. */
+  refreshDeliveries: () => Promise<void>;
 };
 
 const DeliveryContext =
@@ -168,11 +177,25 @@ function rowToOrder(row: OrderRow): Order {
   return {
     id: row.id,
     pickupAddress: row.pickup_address,
+    pickupPostcode: row.pickup_postcode ?? undefined,
     deliveryAddress: row.delivery_address,
-    pickupLat: row.pickup_lat,
-    pickupLng: row.pickup_lng,
-    deliveryLat: row.delivery_lat,
-    deliveryLng: row.delivery_lng,
+    deliveryPostcode: row.delivery_postcode ?? undefined,
+    pickupLat:
+      row.pickup_lat != null && row.pickup_lng != null
+        ? Number(row.pickup_lat)
+        : undefined,
+    pickupLng:
+      row.pickup_lat != null && row.pickup_lng != null
+        ? Number(row.pickup_lng)
+        : undefined,
+    deliveryLat:
+      row.delivery_lat != null && row.delivery_lng != null
+        ? Number(row.delivery_lat)
+        : undefined,
+    deliveryLng:
+      row.delivery_lat != null && row.delivery_lng != null
+        ? Number(row.delivery_lng)
+        : undefined,
     distance: row.distance,
     payout: Number(row.payout),
     packageType: row.package_type,
@@ -214,15 +237,29 @@ const LIFECYCLE_TO_APP: Record<OrderLifecycleEvent, AppOrderStatus> = {
   delivered: "delivered",
 };
 
+const ACTIVE_DB_STATUSES = [
+  "accepted",
+  "heading_to_pickup",
+  "collected",
+  "en_route",
+  "arriving",
+] as const;
+
+function isActiveDriverOrderRow(row: OrderRow): boolean {
+  if (row.completed_at) return false;
+  if (!row.driver_id) return false;
+  return (ACTIVE_DB_STATUSES as readonly string[]).includes(row.status);
+}
+
 function applyOrderRowToMyDeliveries(
   row: OrderRow,
   setMyDeliveries: React.Dispatch<React.SetStateAction<Order[]>>
 ) {
-  const order = rowToOrder(row);
-  if (row.completed_at) {
-    setMyDeliveries((prev) => prev.filter((d) => d.id !== order.id));
+  if (!isActiveDriverOrderRow(row)) {
+    setMyDeliveries((prev) => prev.filter((d) => d.id !== row.id));
     return;
   }
+  const order = rowToOrder(row);
   setMyDeliveries((prev) => {
     const exists = prev.some((d) => d.id === order.id);
     if (!exists) return [order, ...prev];
@@ -305,24 +342,24 @@ function applyCompletedDeliveryState(
   }
 }
 
-const ACTIVE_DB_STATUSES = [
-  "accepted",
-  "heading_to_pickup",
-  "collected",
-  "en_route",
-  "arriving",
-] as const;
+function isPopupSnoozed(
+  orderId: string,
+  snoozedUntil: Map<string, number>
+): boolean {
+  const until = snoozedUntil.get(orderId);
+  if (!until) return false;
+  if (Date.now() >= until) {
+    snoozedUntil.delete(orderId);
+    return false;
+  }
+  return true;
+}
 
-function isIncomingOrder(
-  order: Order,
-  acceptedIds: Set<string>,
-  dismissedIds: Set<string>
-) {
+function isIncomingOrder(order: Order, acceptedIds: Set<string>) {
   return (
     order.status === "pending" &&
     !order.driverId &&
-    !acceptedIds.has(order.id) &&
-    !dismissedIds.has(order.id)
+    !acceptedIds.has(order.id)
   );
 }
 
@@ -345,9 +382,6 @@ export function DeliveryProvider({
   const [currentOrderId, setCurrentOrderId] =
     useState<string | null>(null);
 
-  const [dismissedOrderIds, setDismissedOrderIds] =
-    useState<Set<string>>(new Set());
-
   const [acceptedOrderIds, setAcceptedOrderIds] =
     useState<Set<string>>(new Set());
 
@@ -364,47 +398,48 @@ export function DeliveryProvider({
 
   const knownIncomingRef = useRef<Set<string>>(new Set());
   const notifiedIncomingRef = useRef<Set<string>>(new Set());
+  const popupSnoozedUntilRef = useRef<Map<string, number>>(new Map());
   const initialIncomingLoadRef = useRef(false);
   const sessionClearedRef = useRef(false);
+  const [popupSnoozeVersion, setPopupSnoozeVersion] = useState(0);
+
+  const purgeOrderFromLocalState = useCallback((orderId: string) => {
+    setMyDeliveries((prev) => prev.filter((d) => d.id !== orderId));
+    setIncomingOrders((prev) => prev.filter((d) => d.id !== orderId));
+    setAcceptedOrderIds((prev) => {
+      const next = new Set(prev);
+      next.delete(orderId);
+      return next;
+    });
+    knownIncomingRef.current.delete(orderId);
+    notifiedIncomingRef.current.delete(orderId);
+    popupSnoozedUntilRef.current.delete(orderId);
+  }, []);
 
   const alertForNewOrder = useCallback(
     async (order: Order) => {
       if (!driver?.isOnline) return;
       if (notifiedIncomingRef.current.has(order.id)) return;
-      if (
-        !isIncomingOrder(
-          order,
-          acceptedOrderIds,
-          dismissedOrderIds
-        )
-      ) {
-        return;
-      }
+      if (isPopupSnoozed(order.id, popupSnoozedUntilRef.current)) return;
+      if (!isIncomingOrder(order, acceptedOrderIds)) return;
 
       notifiedIncomingRef.current.add(order.id);
       setFocusIncomingPopup(true);
 
       await notifyNewOrder({
         orderId: getDriverOrderNumber(order),
+        orderUuid: order.id,
         pickupPostcode: postcode(order.pickupAddress),
         deliveryPostcode: postcode(order.deliveryAddress),
         earnings: Number(order.payout || 0),
       });
     },
-    [acceptedOrderIds, dismissedOrderIds, driver?.isOnline]
+    [acceptedOrderIds, driver?.isOnline]
   );
 
   const registerIncomingOrder = useCallback(
     async (order: Order, notify: boolean) => {
-      if (
-        !isIncomingOrder(
-          order,
-          acceptedOrderIds,
-          dismissedOrderIds
-        )
-      ) {
-        return;
-      }
+      if (!isIncomingOrder(order, acceptedOrderIds)) return;
 
       const isNew = !knownIncomingRef.current.has(order.id);
       knownIncomingRef.current.add(order.id);
@@ -418,7 +453,7 @@ export function DeliveryProvider({
         await alertForNewOrder(order);
       }
     },
-    [acceptedOrderIds, alertForNewOrder, dismissedOrderIds]
+    [acceptedOrderIds, alertForNewOrder]
   );
 
   const fetchIncomingOrders = useCallback(async () => {
@@ -431,38 +466,32 @@ export function DeliveryProvider({
       .is("driver_id", null)
       .order("created_at", { ascending: true });
 
-    if (data) {
-      const filtered = (data as OrderRow[])
-        .map(rowToOrder)
-        .filter((order) =>
-          isIncomingOrder(
-            order,
-            acceptedOrderIds,
-            dismissedOrderIds
-          )
-        );
+    const filtered = ((data ?? []) as OrderRow[])
+      .map(rowToOrder)
+      .filter((order) => isIncomingOrder(order, acceptedOrderIds));
 
-      const newOrders = filtered.filter(
-        (order) => !knownIncomingRef.current.has(order.id)
-      );
+    const newOrders = filtered.filter(
+      (order) => !knownIncomingRef.current.has(order.id)
+    );
 
-      filtered.forEach((order) => {
-        knownIncomingRef.current.add(order.id);
-      });
+    knownIncomingRef.current = new Set(filtered.map((order) => order.id));
+    setIncomingOrders(filtered);
 
-      setIncomingOrders(filtered);
-
-      if (initialIncomingLoadRef.current) {
-        for (const order of newOrders) {
+    if (initialIncomingLoadRef.current) {
+      for (const order of newOrders) {
+        void alertForNewOrder(order);
+      }
+    } else {
+      initialIncomingLoadRef.current = true;
+      if (driver?.isOnline) {
+        for (const order of filtered) {
           void alertForNewOrder(order);
         }
-      } else {
-        initialIncomingLoadRef.current = true;
       }
     }
 
     setIsLoadingOrders(false);
-  }, [acceptedOrderIds, alertForNewOrder, dismissedOrderIds]);
+  }, [acceptedOrderIds, alertForNewOrder, driver?.isOnline]);
 
   const fetchCompletedDeliveries = useCallback(async () => {
     if (!driver) {
@@ -478,14 +507,18 @@ export function DeliveryProvider({
       .order("completed_at", { ascending: false });
 
     setCompletedDeliveries(
-      orderRows ? (orderRows as OrderRow[]).map(rowToCompletedDelivery) : []
+      (orderRows ?? []).map((row) => rowToCompletedDelivery(row as OrderRow))
     );
   }, [driver]);
 
   const fetchMyDeliveries = useCallback(async () => {
-    if (!driver) return;
+    if (!driver) {
+      setMyDeliveries([]);
+      setCompletedDeliveries([]);
+      return;
+    }
 
-    const { data: orderRows } = await supabase
+    const { data: orderRows, error } = await supabase
       .from("orders")
       .select("*")
       .eq("driver_id", driver.id)
@@ -493,23 +526,33 @@ export function DeliveryProvider({
       .is("completed_at", null)
       .order("created_at", { ascending: false });
 
-    if (orderRows) {
-      const rows = (orderRows as OrderRow[]).map(rowToOrder);
-      setMyDeliveries(rows);
-      setAcceptedOrderIds((prev) => {
-        const next = new Set(prev);
-        rows.forEach((order) => next.add(order.id));
-        return next;
-      });
+    if (error) {
+      console.error("fetchMyDeliveries failed:", error.message);
+      setMyDeliveries([]);
+      setCompletedDeliveries([]);
+      return;
     }
+
+    const rows = ((orderRows ?? []) as OrderRow[]).map(rowToOrder);
+    setMyDeliveries(rows);
+    setAcceptedOrderIds(new Set(rows.map((order) => order.id)));
 
     await fetchCompletedDeliveries();
   }, [driver, fetchCompletedDeliveries]);
+
+  const refreshDeliveries = useCallback(async () => {
+    await Promise.all([fetchMyDeliveries(), fetchIncomingOrders()]);
+  }, [fetchIncomingOrders, fetchMyDeliveries]);
 
   useEffect(() => {
     if (!driver) return;
     fetchIncomingOrders();
   }, [driver, fetchIncomingOrders]);
+
+  useEffect(() => {
+    if (!driver?.isOnline) return;
+    void initOrderNotifications();
+  }, [driver?.isOnline]);
 
   useEffect(() => {
     if (!driver) return;
@@ -529,21 +572,20 @@ export function DeliveryProvider({
       .channel(`driver-incoming-${driver.id}`)
       .on(
         "postgres_changes",
-        { event: "INSERT", schema: "public", table: "orders" },
+        { event: "*", schema: "public", table: "orders" },
         (payload) => {
-          const row = payload.new as OrderRow;
-          if (row.status !== "pending" || row.driver_id) return;
-          void registerIncomingOrder(rowToOrder(row), true);
-        }
-      )
-      .on(
-        "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "orders" },
-        (payload) => {
+          if (payload.eventType === "DELETE") {
+            const id = (payload.old as OrderRow | undefined)?.id;
+            if (id) purgeOrderFromLocalState(id);
+            return;
+          }
           const row = payload.new as OrderRow;
           if (row.status === "pending" && !row.driver_id) {
             void registerIncomingOrder(rowToOrder(row), true);
+            return;
           }
+          setIncomingOrders((prev) => prev.filter((o) => o.id !== row.id));
+          knownIncomingRef.current.delete(row.id);
         }
       )
       .subscribe();
@@ -551,7 +593,7 @@ export function DeliveryProvider({
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [driver?.id, driver?.isOnline, registerIncomingOrder]);
+  }, [driver?.id, driver?.isOnline, purgeOrderFromLocalState, registerIncomingOrder]);
 
   useEffect(() => {
     if (!driver) return;
@@ -567,7 +609,12 @@ export function DeliveryProvider({
           filter: `driver_id=eq.${driver.id}`,
         },
         (payload) => {
-          const row = (payload.new ?? payload.old) as OrderRow | undefined;
+          if (payload.eventType === "DELETE") {
+            const id = (payload.old as OrderRow | undefined)?.id;
+            if (id) purgeOrderFromLocalState(id);
+            return;
+          }
+          const row = payload.new as OrderRow | undefined;
           if (!row?.id) return;
           applyOrderRowToMyDeliveries(row, setMyDeliveries);
         }
@@ -577,7 +624,7 @@ export function DeliveryProvider({
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [driver?.id]);
+  }, [driver?.id, purgeOrderFromLocalState]);
 
   useEffect(() => {
     if (!driver?.isOnline) return;
@@ -591,14 +638,14 @@ export function DeliveryProvider({
 
   useEffect(() => {
     const onAppState = (state: AppStateStatus) => {
-      if (state === "active" && driver?.isOnline) {
-        void fetchIncomingOrders();
-      }
+      if (state !== "active" || !driver) return;
+      void fetchMyDeliveries();
+      if (driver.isOnline) void fetchIncomingOrders();
     };
 
     const sub = AppState.addEventListener("change", onAppState);
     return () => sub.remove();
-  }, [driver?.isOnline, fetchIncomingOrders]);
+  }, [driver, fetchIncomingOrders, fetchMyDeliveries]);
 
   useEffect(() => {
     if (driver) {
@@ -610,13 +657,15 @@ export function DeliveryProvider({
 
     setIncomingOrders([]);
     setMyDeliveries([]);
+    setCompletedDeliveries([]);
     setCurrentOrderId(null);
     setAcceptedOrderIds(new Set());
-    setDismissedOrderIds(new Set());
     setIsOnlineState(false);
     setFocusIncomingPopup(false);
     knownIncomingRef.current.clear();
     notifiedIncomingRef.current.clear();
+    popupSnoozedUntilRef.current.clear();
+    setPopupSnoozeVersion(0);
     initialIncomingLoadRef.current = false;
   }, [driver]);
 
@@ -731,17 +780,58 @@ export function DeliveryProvider({
     [driver]
   );
 
-  const rejectOrder = useCallback(
-    (orderId: string) => {
-      setDismissedOrderIds((prev) =>
-        new Set(prev).add(orderId)
-      );
-      setIncomingOrders((prev) =>
-        prev.filter((o) => o.id !== orderId)
-      );
-    },
-    []
-  );
+  const rejectOrder = useCallback((orderId: string) => {
+    popupSnoozedUntilRef.current.set(
+      orderId,
+      Date.now() + POPUP_REJECT_COOLDOWN_MS
+    );
+    notifiedIncomingRef.current.delete(orderId);
+    setFocusIncomingPopup(false);
+    setPopupSnoozeVersion((v) => v + 1);
+  }, []);
+
+  const clearPopupSnooze = useCallback((orderId: string) => {
+    if (!popupSnoozedUntilRef.current.has(orderId)) return;
+    popupSnoozedUntilRef.current.delete(orderId);
+    setPopupSnoozeVersion((v) => v + 1);
+  }, []);
+
+  const popupIncomingOrder = useMemo(() => {
+    return (
+      incomingOrders.find(
+        (o) => !isPopupSnoozed(o.id, popupSnoozedUntilRef.current)
+      ) ?? null
+    );
+  }, [incomingOrders, popupSnoozeVersion]);
+
+  useEffect(() => {
+    if (!driver?.isOnline) return;
+
+    const tick = setInterval(() => {
+      const now = Date.now();
+      const expiredIds: string[] = [];
+
+      for (const [orderId, until] of popupSnoozedUntilRef.current) {
+        if (now >= until) {
+          popupSnoozedUntilRef.current.delete(orderId);
+          expiredIds.push(orderId);
+        }
+      }
+
+      if (!expiredIds.length) return;
+
+      setPopupSnoozeVersion((v) => v + 1);
+
+      for (const orderId of expiredIds) {
+        const order = incomingOrders.find((o) => o.id === orderId);
+        if (!order || !isIncomingOrder(order, acceptedOrderIds)) continue;
+        notifiedIncomingRef.current.delete(orderId);
+        void alertForNewOrder(order);
+      }
+    }, 15_000);
+
+    return () => clearInterval(tick);
+  }, [driver?.isOnline, incomingOrders, acceptedOrderIds, alertForNewOrder]);
 
   const startDelivery = useCallback(
     async (orderId: string) => {
@@ -975,6 +1065,8 @@ export function DeliveryProvider({
 
         acceptOrder,
         rejectOrder,
+        clearPopupSnooze,
+        popupIncomingOrder,
         startDelivery,
 
         updateDeliveryStatus,
@@ -993,6 +1085,8 @@ export function DeliveryProvider({
         availableBalance,
 
         isLoadingOrders,
+
+        refreshDeliveries,
       }}
     >
       {children}

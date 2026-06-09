@@ -2,14 +2,18 @@ import { Feather } from "@expo/vector-icons";
 import * as Notifications from "expo-notifications";
 import { router } from "expo-router";
 import React from "react";
-import { Platform, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { AppState, Platform, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { flow } from "@/components/DriverFlowUI";
+import { flow, postcode } from "@/components/DriverFlowUI";
 import { useAuth } from "@/contexts/AuthContext";
 import { useDelivery } from "@/contexts/DeliveryContext";
 import { getDriverOrderNumber } from "@/lib/orderDisplay";
-import { initOrderNotifications, isNewOrderNotification } from "@/lib/orderNotifications";
+import {
+  initOrderNotifications,
+  isNewOrderNotification,
+  ringForNewOrder,
+} from "@/lib/orderNotifications";
 
 function estimateTripTime(distance?: string) {
   if (!distance) return "45 min";
@@ -126,8 +130,15 @@ function IncomingOrderOverlay({
 /** Global new-order popup + notification tap handling (any screen). */
 export function IncomingOrderNotifier() {
   const { driver } = useAuth();
-  const { incomingOrders, myDeliveries, acceptOrder, rejectOrder, setFocusIncomingPopup } = useDelivery();
-  const incoming = incomingOrders[0];
+  const {
+    popupIncomingOrder,
+    myDeliveries,
+    acceptOrder,
+    rejectOrder,
+    clearPopupSnooze,
+    setFocusIncomingPopup,
+  } = useDelivery();
+  const incoming = popupIncomingOrder;
   const [successMessage, setSuccessMessage] = React.useState<string | null>(null);
   const [seconds, setSeconds] = React.useState(30);
   const [accepting, setAccepting] = React.useState(false);
@@ -137,32 +148,58 @@ export function IncomingOrderNotifier() {
   const online = !!driver?.isOnline;
   const hasActiveDeliveries = myDeliveries.length > 0;
   const showPopup = !!driver && !!incoming && online && !hasActiveDeliveries;
-  const activeIncomingId = showPopup ? incoming.id : null;
+  const activeIncomingId = showPopup && incoming ? incoming.id : null;
 
   React.useEffect(() => {
-    initOrderNotifications();
+    void initOrderNotifications();
   }, []);
 
   React.useEffect(() => {
-    function openIncomingFromNotification() {
+    if (!activeIncomingId || !incoming) return;
+    void ringForNewOrder({
+      orderId: getDriverOrderNumber(incoming),
+      orderUuid: incoming.id,
+      pickupPostcode: postcode(incoming.pickupAddress),
+      deliveryPostcode: postcode(incoming.deliveryAddress),
+      earnings: Number(incoming.payout || 0),
+    });
+  }, [activeIncomingId, incoming]);
+
+  const openIncomingFromNotification = React.useCallback(
+    (data: unknown) => {
+      if (!isNewOrderNotification(data)) return;
+      if (data.orderUuid) clearPopupSnooze(data.orderUuid);
       setFocusIncomingPopup(true);
       router.push("/(tabs)");
-    }
+    },
+    [clearPopupSnooze, setFocusIncomingPopup]
+  );
 
+  React.useEffect(() => {
     Notifications.getLastNotificationResponseAsync().then((response) => {
-      if (isNewOrderNotification(response?.notification.request.content.data)) {
-        openIncomingFromNotification();
+      if (response) {
+        openIncomingFromNotification(response.notification.request.content.data);
       }
     });
 
-    const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
-      if (isNewOrderNotification(response.notification.request.content.data)) {
-        openIncomingFromNotification();
-      }
+    const responseSub = Notifications.addNotificationResponseReceivedListener((response) => {
+      openIncomingFromNotification(response.notification.request.content.data);
     });
 
-    return () => subscription.remove();
-  }, [setFocusIncomingPopup]);
+    return () => {
+      responseSub.remove();
+    };
+  }, [openIncomingFromNotification]);
+
+  React.useEffect(() => {
+    const sub = AppState.addEventListener("change", (nextState) => {
+      if (nextState !== "active" || !driver?.isOnline) return;
+      if (!popupIncomingOrder || hasActiveDeliveries) return;
+      setFocusIncomingPopup(true);
+    });
+
+    return () => sub.remove();
+  }, [driver?.isOnline, hasActiveDeliveries, popupIncomingOrder, setFocusIncomingPopup]);
 
   React.useEffect(() => {
     if (!activeIncomingId) return;
@@ -180,7 +217,7 @@ export function IncomingOrderNotifier() {
     return () => clearTimeout(timer);
   }, [seconds, activeIncomingId, rejectOrder]);
 
-  async function handleAccept(order: (typeof incomingOrders)[0]) {
+  async function handleAccept(order: NonNullable<typeof popupIncomingOrder>) {
     if (accepting) return;
     setAccepting(true);
     await acceptOrder(order);

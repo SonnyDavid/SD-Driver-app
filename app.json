@@ -45,10 +45,11 @@
         "expo-notifications",
         {
           "sounds": [
-            "./assets/sounds/new-order.wav"
+            "./assets/sounds/new_order.wav"
           ],
           "icon": "./assets/images/icon.png",
-          "color": "#14C8F3"
+          "color": "#14C8F3",
+          "defaultChannel": "new-orders"
         }
       ]
     ],
