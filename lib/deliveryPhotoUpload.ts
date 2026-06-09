@@ -43,3 +43,44 @@ export async function uploadDeliveryPhoto(orderId: string, localUri: string): Pr
 
   return data.publicUrl;
 }
+
+/** Upload receiver delivery signature image to Supabase Storage and return a persistent public URL. */
+export async function uploadDeliverySignature(orderId: string, localUri: string): Promise<string> {
+  if (isRemotePhotoUri(localUri)) {
+    return localUri;
+  }
+
+  const response = await fetch(localUri);
+  if (!response.ok) {
+    throw new Error("Could not read receiver signature from device.");
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  const contentType = response.headers.get("Content-Type") || "image/png";
+  const path = `${orderId}/receiver-signature-${Date.now()}.png`;
+
+  logCompleteDelivery("storage_upload", { bucket: DELIVERY_PHOTOS_BUCKET, path, type: "receiver_signature" });
+
+  const { error } = await supabase.storage.from(DELIVERY_PHOTOS_BUCKET).upload(path, arrayBuffer, {
+    upsert: true,
+    contentType,
+    cacheControl: "3600",
+  });
+
+  if (error) {
+    const message = error.message || "Failed to upload receiver signature.";
+    if (/bucket not found/i.test(message)) {
+      throw new Error(
+        `Storage bucket "${DELIVERY_PHOTOS_BUCKET}" is missing. Run supabase-schema.sql storage section in the Supabase SQL editor.`
+      );
+    }
+    throw new Error(message);
+  }
+
+  const { data } = supabase.storage.from(DELIVERY_PHOTOS_BUCKET).getPublicUrl(path);
+  if (!data.publicUrl) {
+    throw new Error("Could not generate receiver signature URL.");
+  }
+
+  return data.publicUrl;
+}

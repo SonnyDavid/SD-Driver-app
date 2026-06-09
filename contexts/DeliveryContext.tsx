@@ -138,7 +138,8 @@ type DeliveryContextType = {
 
   completeDelivery: (
     order: Order,
-    deliveryPhotoUrl: string
+    deliveryPhotoUrl: string,
+    receiverSignatureUrl?: string
   ) => Promise<CompletedDelivery>;
 
   /** Local test-mode completion — no Supabase calls. */
@@ -778,7 +779,8 @@ export function DeliveryProvider({
   const completeDelivery = useCallback(
     async (
       order: Order,
-      deliveryPhotoUrl: string
+      deliveryPhotoUrl: string,
+      receiverSignatureUrl?: string
     ): Promise<CompletedDelivery> => {
       logCompleteDelivery("start", { orderId: order.id, driverId: driver?.id });
 
@@ -801,12 +803,14 @@ export function DeliveryProvider({
       logCompleteDelivery("update_order_completion", {
         orderId: order.id,
         delivery_photo_url: deliveryPhotoUrl,
+        receiver_signature_url: receiverSignatureUrl,
       });
 
       try {
         await syncOrderLifecycle(order.id, "delivered", {
           delivery_photo_url: deliveryPhotoUrl,
           delivery_proof_photo_url: deliveryPhotoUrl,
+          receiver_signature_url: receiverSignatureUrl,
           completed_at: completedAt,
           delivered_at: completedAt,
           pin_verified: true,
