@@ -23,9 +23,17 @@ import { useFocusEffect } from "@react-navigation/native";
 import { SignaturePad } from "@/components/SignaturePad";
 import { getDeliveryProof, saveDeliveryProof, deliveryPhotoDisplayUri } from "@/lib/deliveryProofStorage";
 import { logCompleteDelivery, supabaseErrorMessage } from "@/lib/completeDeliveryLog";
-import { uploadDeliveryPhoto } from "@/lib/deliveryPhotoUpload";
+import { logConfirmPickup } from "@/lib/confirmPickupLog";
+import { uploadDeliveryPhoto, uploadDeliverySignature } from "@/lib/deliveryPhotoUpload";
+import { uploadPickupPhoto, uploadPickupSignature } from "@/lib/pickupProofUpload";
 import { getPickupProof, savePickupPhoto, savePickupProof, savePickupSignature } from "@/lib/pickupProofStorage";
-import { mapsAppLabel, openMapsNavigation } from "@/lib/openMaps";
+import {
+  mapsAppLabel,
+  formatMapsAddress,
+  mapsTargetFromDelivery,
+  mapsTargetFromPickup,
+  openMapsNavigation,
+} from "@/lib/openMaps";
 import { getDriverOrderNumber } from "@/lib/orderDisplay";
 import { fetchOrderDeliveryConfirmationPin } from "@/lib/orderDeliveryPin";
 import { copyToClipboard } from "@/lib/copyToClipboard";
@@ -57,13 +65,17 @@ import {
   SignaturePanel,
   StatusPill,
   cityLine,
-  demoOrder,
   deliveryStatusLabel,
   DriverAvatar,
   estimateEta,
   estimateTravelMinutes,
   extractPostcode,
   flow,
+  formatOrderAge,
+  formatTripDistance,
+  formatTripEta,
+  resolveServiceTier,
+  serviceTierColor,
   parseAddressLines,
   postcode,
   resolveWorkflowStage,
@@ -75,64 +87,6 @@ import {
 } from "@/components/DriverFlowUI";
 
 type VehicleType = "car" | "van" | "motorcycle";
-
-const demoOrders = [
-  {
-    ...demoOrder,
-    id: "demo-2",
-    packageId: "SD-ORD-12346",
-    recipientName: "Bright Retail Co",
-    senderName: "Bright Retail Co",
-    senderPhone: "+44 28 9024 5678",
-    pickupAddress: "88 Innovation Drive, Belfast, BT1 2NH",
-    deliveryAddress: "23 Chelsea Manor Street, Belfast, BT5 6AF",
-    pickupInstructions:
-      "Please report to the reception desk and show your Driver ID. Collection point is at the loading bay on the right-hand side.",
-    payout: 9.4,
-    distance: "4.2 miles",
-    status: "driver_assigned" as const,
-    acceptedAt: "09:14",
-    scheduledPickup: "11:30",
-  },
-  {
-    ...demoOrder,
-    id: "demo-arrived",
-    packageId: "SD-ORD-12347",
-    recipientName: "City Pharmacy",
-    pickupAddress: "14 Royal Avenue, Belfast, BT1 1FF",
-    deliveryAddress: "6 Botanic Avenue, Belfast, BT7 1JR",
-    payout: 11.2,
-    distance: "2.1 miles",
-    status: "driver_assigned" as const,
-    acceptedAt: "09:05",
-  },
-  {
-    ...demoOrder,
-    id: "demo-3",
-    packageId: "SD-ORD-12348",
-    recipientName: "Harbour Foods",
-    pickupAddress: "52 Titanic Quarter, Belfast, BT3 9DT",
-    deliveryAddress: "19 Antrim Road, Belfast, BT15 2GD",
-    payout: 8.75,
-    distance: "3.6 miles",
-    status: "en_route" as const,
-    acceptedAt: "08:47",
-  },
-  {
-    ...demoOrder,
-    id: "demo-4",
-    packageId: "SD-ORD-12349",
-    recipientName: "Luna Cole",
-    pickupAddress: "15 Stranmillis Road, Belfast, BT9 5AF",
-    deliveryAddress: "3 Main Street, Holywood, BT18 9AB",
-    payout: 12.5,
-    distance: "2.8 miles",
-    status: "arriving" as const,
-    acceptedAt: "08:20",
-  },
-];
-
-const DEMO_ARRIVED_ORDER_ID = "demo-arrived";
 
 function usePickupCountdown(minutesFromNow = 45) {
   const [label, setLabel] = React.useState("");
@@ -157,13 +111,15 @@ function usePickupCountdown(minutesFromNow = 45) {
 function AddressBlock({
   kind,
   address,
+  explicitPostcode,
   alignRight,
 }: {
   kind: "Pickup" | "Delivery";
   address?: string;
+  explicitPostcode?: string | null;
   alignRight?: boolean;
 }) {
-  const lines = parseAddressLines(address);
+  const lines = parseAddressLines(address, "Address pending", "", explicitPostcode);
   const pinColor = kind === "Pickup" ? flow.cyan : flow.green;
   return (
     <View style={[styles.dashAddressBlock, alignRight && { alignItems: "flex-end" }]}>
@@ -211,11 +167,11 @@ type MyDeliveryItem = {
   payout: number;
   status: string;
   acceptedAt?: string;
-  completedAt?: string;
+  completedAt?: string | null;
   scheduledPickup?: string;
 };
 
-function getWorkflowAction(stage: WorkflowStage, order: MyDeliveryItem) {
+function getWorkflowAction(stage: WorkflowStage, _order: Pick<MyDeliveryItem, "status">) {
   switch (stage) {
     case "Pickup Pending":
       return { label: "START PICKUP", path: "/delivery-navigation", focus: true };
@@ -428,13 +384,33 @@ function useWorkflowOrder() {
   const { id } = useLocalSearchParams<{ id?: string }>();
   const { getOrderById, currentOrderId, myDeliveries } = useDelivery();
   const orderId = id || currentOrderId || undefined;
-  return (orderId ? getOrderById(orderId) : null) || myDeliveries[0] || demoOrder;
+  const order =
+    (orderId ? getOrderById(orderId) : null) ?? myDeliveries[0] ?? null;
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!order) router.replace("/(tabs)");
+    }, [order])
+  );
+
+  return order;
 }
 
 function useOrderFromParam(orderId?: string) {
-  const { getOrderById, currentOrder } = useDelivery();
-  if (orderId) return getOrderById(orderId) || currentOrder || demoOrder;
-  return currentOrder || demoOrder;
+  const { getOrderById, currentOrder, myDeliveries } = useDelivery();
+  const order =
+    (orderId ? getOrderById(orderId) : null) ??
+    currentOrder ??
+    myDeliveries[0] ??
+    null;
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!order) router.replace("/(tabs)");
+    }, [order])
+  );
+
+  return order;
 }
 
 function scrollPads(extraBottom = 88) {
@@ -1110,34 +1086,34 @@ export function DashboardScreen() {
     completedDeliveries,
     startDelivery,
     todayEarnings,
+    refreshDeliveries,
   } = useDelivery();
+
+  useFocusEffect(
+    useCallback(() => {
+      void refreshDeliveries();
+    }, [refreshDeliveries])
+  );
   const [idCopied, setIdCopied] = React.useState(false);
   const pickupCountdown = usePickupCountdown(38);
   const topPad = safeTop() + 4;
   const bottomPad = safeBottom() + 46;
   const online = !!driver?.isOnline;
-  const usingDemo = !myDeliveries.length && !completedDeliveries.length;
-  const deliveries = usingDemo ? demoOrders : myDeliveries;
-
-  const priority = usingDemo
-    ? pickPriorityOrder(deliveries) || deliveries[0]
-    : pickPriorityOrder(myDeliveries.filter((o) => o.status !== "delivered")) ||
-      currentOrder ||
-      undefined;
-
-  const upcoming = usingDemo
-    ? deliveries.filter((o) => o.id !== priority?.id)
-    : myDeliveries.filter((o) => o.id !== priority?.id);
+  const activeDeliveries = myDeliveries.filter((o) => o.status !== "delivered");
+  const priority =
+    pickPriorityOrder(activeDeliveries) || currentOrder || undefined;
+  const upcoming = myDeliveries.filter((o) => o.id !== priority?.id);
 
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
-  const completedToday = usingDemo
-    ? 18
-    : completedDeliveries.filter((d) => new Date(d.date) >= todayStart).length;
+  const completedToday = completedDeliveries.filter((d) => {
+    const timestamp = Date.parse(d.date);
+    return !Number.isNaN(timestamp) && timestamp >= todayStart.getTime();
+  }).length;
 
-  const activeCount = usingDemo ? 1 : myDeliveries.length;
-  const pendingCount = usingDemo ? 2 : queuedDeliveries.length;
-  const earningsToday = usingDemo ? 142.5 : todayEarnings;
+  const activeCount = myDeliveries.length;
+  const pendingCount = queuedDeliveries.length;
+  const earningsToday = todayEarnings;
   const progress = deliveryProgress(priority?.status || "en_route");
   const driverCode = driver?.driverId || "SD-123456";
 
@@ -1149,13 +1125,13 @@ export function DashboardScreen() {
     }
   }
 
-  async function handleContinue(order: (typeof deliveries)[0]) {
-    if (!usingDemo) await startDelivery(order.id);
+  async function handleContinue(order: (typeof myDeliveries)[0]) {
+    await startDelivery(order.id);
     workflowPush(workflowRouteForOrder(order), order.id);
   }
 
-  async function handleStartPickup(order: (typeof deliveries)[0]) {
-    if (!usingDemo) await startDelivery(order.id);
+  async function handleStartPickup(order: (typeof myDeliveries)[0]) {
+    await startDelivery(order.id);
     workflowPush("/delivery-navigation", order.id);
   }
 
@@ -1211,7 +1187,7 @@ export function DashboardScreen() {
                 </View>
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={styles.priorityOrderId} numberOfLines={1}>{getDriverOrderNumber(priority)}</Text>
-                  <Text style={styles.priorityName} numberOfLines={1}>{priority.recipientName || "Emma Wilson"}</Text>
+                  <Text style={styles.priorityName} numberOfLines={1}>{priority.recipientName || "Customer"}</Text>
                   <Text style={styles.priorityStatus}>
                     {deliveryStatusLabel(priority.status, currentOrderId, priority.id).toUpperCase()}
                   </Text>
@@ -1224,7 +1200,7 @@ export function DashboardScreen() {
             </View>
 
             <View style={styles.priorityAddressStack}>
-              <AddressBlock kind="Pickup" address={priority.pickupAddress} />
+              <AddressBlock kind="Pickup" address={priority.pickupAddress} explicitPostcode={priority.pickupPostcode} />
               <View style={styles.priorityAddressConnector}>
                 <View style={styles.priorityConnectorDot} />
                 <View style={styles.priorityConnectorLine} />
@@ -1232,7 +1208,7 @@ export function DashboardScreen() {
                 <View style={styles.priorityConnectorLine} />
                 <View style={[styles.priorityConnectorDot, { backgroundColor: flow.green }]} />
               </View>
-              <AddressBlock kind="Delivery" address={priority.deliveryAddress} alignRight />
+              <AddressBlock kind="Delivery" address={priority.deliveryAddress} explicitPostcode={priority.deliveryPostcode} alignRight />
             </View>
 
             <View style={styles.priorityDeadlineRow}>
@@ -1255,17 +1231,31 @@ export function DashboardScreen() {
           </View>
         )}
 
-        <View style={styles.dashboardSectionHead}>
-          <Feather name="calendar" size={11} color={flow.cyan} />
-          <Text style={styles.dashboardSectionLabel}>UPCOMING DELIVERIES</Text>
-          <TouchableOpacity style={styles.dashboardViewAllLink} onPress={() => router.push("/(tabs)/deliveries")}>
-            <Text style={styles.dashboardViewAllText}>View all</Text>
-            <Feather name="chevron-right" size={12} color={flow.cyan} />
-          </TouchableOpacity>
-        </View>
-        {upcoming.map((order) => (
-          <UpcomingDeliveryRow key={order.id} order={order} onStart={() => handleStartPickup(order)} />
-        ))}
+        {upcoming.length > 0 && (
+          <>
+            <View style={styles.dashboardSectionHead}>
+              <Feather name="calendar" size={11} color={flow.cyan} />
+              <Text style={styles.dashboardSectionLabel}>UPCOMING DELIVERIES</Text>
+              <TouchableOpacity style={styles.dashboardViewAllLink} onPress={() => router.push("/(tabs)/deliveries")}>
+                <Text style={styles.dashboardViewAllText}>View all</Text>
+                <Feather name="chevron-right" size={12} color={flow.cyan} />
+              </TouchableOpacity>
+            </View>
+            {upcoming.map((order) => (
+              <UpcomingDeliveryRow key={order.id} order={order} onStart={() => handleStartPickup(order)} />
+            ))}
+          </>
+        )}
+
+        {!priority && upcoming.length === 0 && (
+          <View style={[styles.dashboardCard, styles.dashboardEmptyCard]}>
+            <Feather name="inbox" size={22} color={flow.muted} />
+            <Text style={styles.dashboardEmptyTitle}>No active deliveries</Text>
+            <Text style={styles.dashboardEmptySub}>
+              Accepted jobs will appear here. Go online and check Available Deliveries for new work.
+            </Text>
+          </View>
+        )}
 
         <View style={[styles.dashboardCard, styles.todayEarningsCard]}>
           <View style={styles.todayEarningsHeader}>
@@ -1347,12 +1337,117 @@ function UpcomingDeliveryRow({ order, onStart }: { order: any; onStart: () => vo
   );
 }
 
+type AvailableQueueOrder = {
+  id: string;
+  pickupAddress: string;
+  pickupPostcode?: string | null;
+  deliveryAddress: string;
+  deliveryPostcode?: string | null;
+  distance?: string | number | null;
+  payout?: number;
+  createdAt?: string;
+  deliveryType?: string | null;
+  orderNumber?: string;
+  packageId?: string;
+  scheduledPickup?: string;
+};
+
+function AvailableDeliveryCard({
+  order,
+  disabled,
+  onAccept,
+  onReject,
+}: {
+  order: AvailableQueueOrder;
+  disabled?: boolean;
+  onAccept: () => void;
+  onReject: () => void;
+}) {
+  const tier = resolveServiceTier(order.deliveryType, {
+    scheduledPickup: order.scheduledPickup,
+  });
+  const tierColor = serviceTierColor(tier);
+  const pickupPc = extractPostcode(order.pickupAddress, order.pickupPostcode);
+  const dropPc = extractPostcode(order.deliveryAddress, order.deliveryPostcode);
+
+  return (
+    <Card style={styles.dispatchCard}>
+      <View style={styles.dispatchTopRow}>
+        <Text style={styles.dispatchOrderId} numberOfLines={1}>
+          {getDriverOrderNumber(order)}
+        </Text>
+        <View style={styles.dispatchTopMeta}>
+          <View
+            style={[
+              styles.dispatchTierPill,
+              { borderColor: `${tierColor}55`, backgroundColor: `${tierColor}14` },
+            ]}
+          >
+            <Text style={[styles.dispatchTierText, { color: tierColor }]}>{tier}</Text>
+          </View>
+          <Text style={styles.dispatchEarnings}>£{Number(order.payout || 0).toFixed(2)}</Text>
+        </View>
+      </View>
+
+      <View style={styles.dispatchRouteRow}>
+        <Text style={styles.dispatchPostcode}>{pickupPc}</Text>
+        <Feather name="arrow-right" size={12} color={flow.muted2} />
+        <Text style={styles.dispatchPostcode}>{dropPc}</Text>
+        <Text style={styles.dispatchAge}>{formatOrderAge(order.createdAt)}</Text>
+      </View>
+
+      <View style={styles.dispatchStatsRow}>
+        <View style={styles.dispatchStat}>
+          <Feather name="map" size={11} color={flow.cyan} />
+          <Text style={styles.dispatchStatLabel}>DIST</Text>
+          <Text style={styles.dispatchStatValue}>{formatTripDistance(order.distance)}</Text>
+        </View>
+        <View style={styles.dispatchStat}>
+          <Feather name="clock" size={11} color={flow.cyan} />
+          <Text style={styles.dispatchStatLabel}>DRIVE</Text>
+          <Text style={styles.dispatchStatValue}>{formatTripEta(order.distance)}</Text>
+        </View>
+      </View>
+
+      <View style={styles.dispatchActions}>
+        <TouchableOpacity
+          style={[styles.dispatchRejectBtn, disabled && styles.dispatchBtnDisabled]}
+          onPress={onReject}
+          disabled={disabled}
+          activeOpacity={0.88}
+        >
+          <Feather name="x" size={14} color={flow.red} />
+          <Text style={styles.dispatchRejectText}>REJECT</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.dispatchAcceptBtn, disabled && styles.dispatchBtnDisabled]}
+          onPress={onAccept}
+          disabled={disabled}
+          activeOpacity={0.88}
+        >
+          <Feather name="check" size={14} color={flow.onCyan} />
+          <Text style={styles.dispatchAcceptText}>ACCEPT</Text>
+        </TouchableOpacity>
+      </View>
+    </Card>
+  );
+}
+
 export function OrdersScreen() {
-  const { incomingOrders, acceptOrder, rejectOrder } = useDelivery();
-  const orders = incomingOrders.length ? incomingOrders : demoOrders;
-  const isDemo = !incomingOrders.length;
+  const { incomingOrders, acceptOrder, rejectOrder, myDeliveries, refreshDeliveries } = useDelivery();
+  const orders = incomingOrders;
+
+  useFocusEffect(
+    useCallback(() => {
+      void refreshDeliveries();
+    }, [refreshDeliveries])
+  );
   const [successMessage, setSuccessMessage] = React.useState<string | null>(null);
   const topInset = safeTop();
+  const queueSubtitle =
+    myDeliveries.length > 0
+      ? `${orders.length} in queue · popups paused · accept compatible jobs here`
+      : `${orders.length} in queue · scan route, earnings & distance`;
 
   async function handleAccept(order: (typeof incomingOrders)[0]) {
     await acceptOrder(order);
@@ -1369,21 +1464,25 @@ export function OrdersScreen() {
         </View>
       )}
       <ScrollView contentContainerStyle={[styles.page, scrollPads()]} showsVerticalScrollIndicator={false}>
-        <HeaderBar title="Available Deliveries" subtitle="Accept orders into your queue" />
-        {orders.map((order: any) => (
-          <Card key={order.id} style={{ gap: 10, marginBottom: 10 }}>
-            <View style={styles.rowBetween}>
-              <StatusPill label="New" color={flow.cyan} />
-              <Text style={styles.price}>£{Number(order.payout || 9.4).toFixed(2)}</Text>
-            </View>
-            <Text style={styles.muted}>{getDriverOrderNumber(order)}</Text>
-            <RouteSummary from={order.pickupAddress} to={order.deliveryAddress} />
-            <View style={styles.row}>
-              <PrimaryButton label="REJECT" tone="red" disabled={isDemo} onPress={() => rejectOrder(order.id)} />
-              <PrimaryButton label="ACCEPT" tone="green" disabled={isDemo} onPress={() => handleAccept(order)} />
-            </View>
-          </Card>
-        ))}
+        <HeaderBar title="Available Deliveries" subtitle={queueSubtitle} />
+        {orders.length === 0 ? (
+          <View style={[styles.dashboardCard, styles.dashboardEmptyCard]}>
+            <Feather name="package" size={22} color={flow.muted} />
+            <Text style={styles.dashboardEmptyTitle}>No deliveries available</Text>
+            <Text style={styles.dashboardEmptySub}>
+              New jobs will appear here when dispatch assigns them to the queue.
+            </Text>
+          </View>
+        ) : (
+          orders.map((order) => (
+            <AvailableDeliveryCard
+              key={order.id}
+              order={order}
+              onAccept={() => handleAccept(order)}
+              onReject={() => rejectOrder(order.id)}
+            />
+          ))
+        )}
       </ScrollView>
     </ScreenShell>
   );
@@ -1397,31 +1496,21 @@ export function DeliveriesScreen() {
     currentOrderId,
     startDelivery,
     todayEarnings,
+    refreshDeliveries,
   } = useDelivery();
+
+  useFocusEffect(
+    useCallback(() => {
+      void refreshDeliveries();
+    }, [refreshDeliveries])
+  );
   const [filter, setFilter] = React.useState<MyDeliveryFilter>("all");
   const topPad = safeTop() + 4;
   const bottomPad = safeBottom() + 46;
   const online = !!driver?.isOnline;
-  const usingDemo = !myDeliveries.length && !completedDeliveries.length;
-  const focusedOrderId = usingDemo ? currentOrderId || DEMO_ARRIVED_ORDER_ID : currentOrderId;
+  const focusedOrderId = currentOrderId;
 
-  const demoCompleted: MyDeliveryItem[] = [
-    {
-      id: "demo-done",
-      orderNumber: "SD-ORD-12345",
-      packageId: "SD-ORD-12345",
-      senderName: "Emma Wilson",
-      recipientName: "Emma Wilson",
-      pickupAddress: "25 Donegall Square North, Belfast, BT1 5GS",
-      deliveryAddress: "12 High Street, Bangor, BT20 5BG",
-      distance: "3.7 miles",
-      payout: 7.2,
-      status: "delivered",
-      completedAt: "10:05",
-    },
-  ];
-
-  const activeItems: MyDeliveryItem[] = (usingDemo ? demoOrders : myDeliveries).map((o) => ({
+  const activeItems: MyDeliveryItem[] = myDeliveries.map((o) => ({
     id: o.id,
     orderNumber: o.orderNumber,
     packageId: o.packageId,
@@ -1436,24 +1525,22 @@ export function DeliveriesScreen() {
     scheduledPickup: (o as MyDeliveryItem).scheduledPickup,
   }));
 
-  const completedItems: MyDeliveryItem[] = usingDemo
-    ? demoCompleted
-    : completedDeliveries.map((d) => ({
-        id: d.orderId,
-        orderNumber: d.orderNumber,
-        packageId: d.packageId,
-        senderName: d.recipientName,
-        recipientName: d.recipientName || "Customer",
-        pickupAddress: d.pickupAddress,
-        deliveryAddress: d.deliveryAddress,
-        distance: d.distance,
-        payout: d.amount,
-        status: "delivered",
-        completedAt: new Date(d.date).toLocaleTimeString("en-GB", {
-          hour: "2-digit",
-          minute: "2-digit",
-        }),
-      }));
+  const completedItems: MyDeliveryItem[] = completedDeliveries.map((d) => ({
+    id: d.orderId,
+    orderNumber: d.orderNumber,
+    packageId: d.packageId,
+    senderName: d.recipientName,
+    recipientName: d.recipientName || "Customer",
+    pickupAddress: d.pickupAddress,
+    deliveryAddress: d.deliveryAddress,
+    distance: d.distance,
+    payout: d.amount,
+    status: "delivered",
+    completedAt: new Date(d.date).toLocaleTimeString("en-GB", {
+      hour: "2-digit",
+      minute: "2-digit",
+    }),
+  }));
 
   const allItems = [...activeItems, ...completedItems];
   const stages = allItems.map((o) =>
@@ -1473,7 +1560,7 @@ export function DeliveriesScreen() {
     filterMatchesStage(filter, stages[i])
   );
 
-  const earningsToday = usingDemo ? 7.2 : todayEarnings;
+  const earningsToday = todayEarnings;
   const datePart = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 
   async function handleAction(order: MyDeliveryItem) {
@@ -1482,7 +1569,7 @@ export function DeliveriesScreen() {
       orderId: order.id,
     });
     const action = getWorkflowAction(stage, order);
-    if (action.focus && !usingDemo) await startDelivery(order.id);
+    if (action.focus) await startDelivery(order.id);
     workflowPush(action.path, order.id);
   }
 
@@ -1591,6 +1678,7 @@ export function DeliveryDetailsScreen() {
   const { id } = useLocalSearchParams<{ id?: string }>();
   const { startDelivery, currentOrderId } = useDelivery();
   const order = useOrderFromParam(id);
+  if (!order) return null;
   const stage = resolveWorkflowStage(order.status, { focusedOrderId: currentOrderId, orderId: order.id });
   const action = getWorkflowAction(stage, order);
 
@@ -1612,8 +1700,8 @@ export function DeliveryDetailsScreen() {
           <View style={styles.customerRow}>
             <View style={styles.avatar}><Text style={styles.avatarText}>{(order.recipientName || "E").charAt(0)}</Text></View>
             <View style={{ flex: 1 }}>
-              <Text style={styles.name}>{order.recipientName || "Emma Wilson"}</Text>
-              <Text style={styles.muted}>{order.recipientPhone || order.customerPhone || "+44 7700 900123"}</Text>
+              <Text style={styles.name}>{order.recipientName || "Customer"}</Text>
+              <Text style={styles.muted}>{order.recipientPhone || order.customerPhone || ""}</Text>
             </View>
             <Feather name="phone" size={18} color={flow.cyan} />
           </View>
@@ -1632,24 +1720,23 @@ export function DeliveryDetailsScreen() {
 
 export function PickupNavigationScreen() {
   const order = useWorkflowOrder();
-  const { startDelivery } = useDelivery();
+  const { startDelivery, recordOrderEvent } = useDelivery();
+  if (!order) return null;
   const statusLabel: WorkflowStage = "Pickup Pending";
-  const pickup = parseAddressLines(order.pickupAddress, "88 Innovation Drive", "Belfast");
+  const pickup = parseAddressLines(order.pickupAddress, "Address pending", "", order.pickupPostcode);
+  const pickupMapsQuery = formatMapsAddress(order.pickupAddress, order.pickupPostcode);
   const pickupDistance = order.distance || "4.2 miles";
   const travelTime = estimateTravelMinutes(pickupDistance);
   const instructions =
     order.pickupInstructions?.trim() ||
     "Please report to the reception desk and show your Driver ID. Collection point is at the loading bay on the right-hand side.";
   const senderName = order.senderName || order.recipientName || "Sender";
-  const senderPhone = order.senderPhone || order.recipientPhone || order.customerPhone || "+44 7700 900123";
+  const senderPhone = order.senderPhone || order.recipientPhone || order.customerPhone || "";
 
   async function handleStartNavigation() {
     try {
-      await openMapsNavigation({
-        address: order.pickupAddress,
-        lat: order.pickupLat,
-        lng: order.pickupLng,
-      });
+      await recordOrderEvent(order.id, "heading_to_pickup");
+      await openMapsNavigation(mapsTargetFromPickup(order));
     } catch {
       Alert.alert("Unable to open maps", "Please check that a maps app is installed on your device.");
     }
@@ -1664,8 +1751,13 @@ export function PickupNavigationScreen() {
         {
           text: "Yes",
           onPress: async () => {
-            await startDelivery(order.id);
-            workflowPush("/pickup-verification", order.id);
+            try {
+              await recordOrderEvent(order.id, "arrived_pickup");
+              await startDelivery(order.id);
+              workflowPush("/pickup-verification", order.id);
+            } catch {
+              Alert.alert("Update failed", "Could not record arrival at pickup. Please try again.");
+            }
           },
         },
       ]
@@ -1729,7 +1821,7 @@ export function PickupNavigationScreen() {
             </View>
           </View>
 
-          <MiniMap destination={pickup.postcode || pickup.street} />
+          <MiniMap destination={pickupMapsQuery} />
         </View>
 
         <View style={styles.pickupSectionCard}>
@@ -1784,21 +1876,20 @@ export function PickupNavigationScreen() {
 
 export function CustomerNavigationScreen() {
   const order = useWorkflowOrder();
-  const { updateDeliveryStatus } = useDelivery();
-  const delivery = parseAddressLines(order.deliveryAddress, "23 Chelsea Manor Street", "Belfast");
-  const receiverName = order.recipientName || "Emma Wilson";
-  const receiverPhone = order.recipientPhone || order.customerPhone || "+44 7700 900123";
+  const { recordOrderEvent } = useDelivery();
+  if (!order) return null;
+  const delivery = parseAddressLines(order.deliveryAddress, "Address pending", "", order.deliveryPostcode);
+  const deliveryMapsQuery = formatMapsAddress(order.deliveryAddress, order.deliveryPostcode);
+  const receiverName = order.recipientName || "Customer";
+  const receiverPhone = order.recipientPhone || order.customerPhone || "";
   const orderCode = getDriverOrderNumber(order);
   const tripDistance = order.distance || "4.3 mi";
   const travelTime = estimateTravelMinutes(tripDistance);
 
   async function handleOpenNavigation() {
     try {
-      await openMapsNavigation({
-        address: order.deliveryAddress,
-        lat: order.deliveryLat,
-        lng: order.deliveryLng,
-      });
+      await recordOrderEvent(order.id, "en_route");
+      await openMapsNavigation(mapsTargetFromDelivery(order));
     } catch {
       Alert.alert("Unable to open maps", "Please check that a maps app is installed on your device.");
     }
@@ -1813,8 +1904,12 @@ export function CustomerNavigationScreen() {
         {
           text: "Yes",
           onPress: async () => {
-            await updateDeliveryStatus(order.id, "en_route");
-            workflowPush("/customer-proof", order.id);
+            try {
+              await recordOrderEvent(order.id, "arriving");
+              workflowPush("/customer-proof", order.id);
+            } catch {
+              Alert.alert("Update failed", "Could not record arrival at delivery. Please try again.");
+            }
           },
         },
       ]
@@ -1889,7 +1984,7 @@ export function CustomerNavigationScreen() {
             <Feather name="navigation" size={16} color={flow.cyan} />
           </View>
           <View style={styles.deliveryNavMapWrap}>
-            <MiniMap destination={delivery.postcode || delivery.street} />
+            <MiniMap destination={deliveryMapsQuery} />
           </View>
         </View>
 
@@ -1928,21 +2023,23 @@ export function CustomerNavigationScreen() {
 
 export function PickupVerificationScreen() {
   const order = useWorkflowOrder();
-  const { updateDeliveryStatus } = useDelivery();
+  const { recordOrderEvent } = useDelivery();
+  const orderId = order?.id;
   const [photoUri, setPhotoUri] = useState("");
   const [signatureUri, setSignatureUri] = useState<string | null>(null);
   const [signatureSaved, setSignatureSaved] = useState(false);
   const [isConfirming, setIsConfirming] = useState(false);
   const [scrollEnabled, setScrollEnabled] = useState(true);
 
-  const senderName = order.senderName || order.recipientName || "John McAllister";
-  const orderCode = getDriverOrderNumber(order);
+  const senderName = order?.senderName || order?.recipientName || "Sender";
+  const orderCode = order ? getDriverOrderNumber(order) : "";
   const canConfirm = !!photoUri && signatureSaved && !!signatureUri;
 
   React.useEffect(() => {
+    if (!orderId) return;
     let active = true;
     (async () => {
-      const proof = await getPickupProof(order.id);
+      const proof = await getPickupProof(orderId);
       if (!active || !proof) return;
       if (proof.photoUri) setPhotoUri(proof.photoUri);
       if (proof.signatureImageUri) {
@@ -1953,7 +2050,9 @@ export function PickupVerificationScreen() {
     return () => {
       active = false;
     };
-  }, [order.id]);
+  }, [orderId]);
+
+  if (!order) return null;
 
   async function takePhoto() {
     const { status } = await ImagePicker.requestCameraPermissionsAsync();
@@ -1986,26 +2085,47 @@ export function PickupVerificationScreen() {
 
     setIsConfirming(true);
     try {
+      logConfirmPickup("start", { orderId: order.id });
+
+      logConfirmPickup("pickup_photo_upload_start", { orderId: order.id });
+      const pickupPhotoUrl = await uploadPickupPhoto(order.id, photoUri);
+      console.log("[ConfirmPickup] uploaded pickup photo URL:", pickupPhotoUrl);
+      logConfirmPickup("pickup_photo_upload_ok", { url: pickupPhotoUrl });
+
+      logConfirmPickup("pickup_signature_upload_start", { orderId: order.id });
+      const signatureUrl = await uploadPickupSignature(order.id, signatureUri);
+      console.log("[ConfirmPickup] uploaded pickup signature URL:", signatureUrl);
+      logConfirmPickup("pickup_signature_upload_ok", { url: signatureUrl });
+
+      const dbPayload = {
+        pickup_photo_url: pickupPhotoUrl,
+        signature_url: signatureUrl,
+      };
+      console.log("[ConfirmPickup] database update payload:", dbPayload);
+      logConfirmPickup("database_update_payload", dbPayload);
+
+      const now = new Date().toISOString();
       await savePickupProof({
         orderId: order.id,
         signatureImageUri: signatureUri,
-        signatureTimestamp: new Date().toISOString(),
-        photoUri,
-        photoTimestamp: new Date().toISOString(),
+        signatureTimestamp: now,
+        photoUri: pickupPhotoUrl,
+        photoTimestamp: now,
       });
-      await updateDeliveryStatus(order.id, "package_collected");
+
+      await recordOrderEvent(order.id, "collected", dbPayload);
+      logConfirmPickup("database_update_ok", { orderId: order.id });
+      await recordOrderEvent(order.id, "en_route");
       try {
-        await openMapsNavigation({
-          address: order.deliveryAddress,
-          lat: order.deliveryLat,
-          lng: order.deliveryLng,
-        });
+        await openMapsNavigation(mapsTargetFromDelivery(order));
       } catch {
         // Maps may be unavailable on web/simulator — still continue to delivery navigation.
       }
       router.replace({ pathname: "/navigate-customer", params: { id: order.id } });
-    } catch {
-      Alert.alert("Pickup failed", "Could not confirm pickup. Please try again.");
+    } catch (error) {
+      const message = supabaseErrorMessage(error);
+      logConfirmPickup("failed", message);
+      Alert.alert("Pickup failed", message);
     } finally {
       setIsConfirming(false);
     }
@@ -2104,8 +2224,9 @@ export function PickupVerificationScreen() {
 export function AfterPickupScreen() {
   const order = useWorkflowOrder();
   React.useEffect(() => {
+    if (!order) return;
     router.replace({ pathname: "/navigate-customer", params: { id: order.id } });
-  }, [order.id]);
+  }, [order]);
   return (
     <ScreenShell>
       <View style={[styles.page, styles.center, { paddingTop: safeTop(), paddingBottom: safeBottom() + 18 }]}>
@@ -2121,7 +2242,8 @@ export function CustomerPinScreen() {
 
 export function DeliveryConfirmationScreen() {
   const order = useWorkflowOrder();
-  const { completeDelivery } = useDelivery();
+  const { completeDelivery, recordOrderEvent } = useDelivery();
+  const orderId = order?.id;
   const [pin, setPin] = useState("");
   const [pinVerified, setPinVerified] = useState(false);
   const [pinError, setPinError] = useState("");
@@ -2138,21 +2260,22 @@ export function DeliveryConfirmationScreen() {
   const [isCompleting, setIsCompleting] = useState(false);
   const pinInputRef = React.useRef<TextInput>(null);
 
-  const senderName = order.senderName || order.recipientName || "John McAllister";
-  const receiverName = order.recipientName || "David Anderson";
-  const receiverPhone = order.recipientPhone || order.customerPhone || "+44 7700 900123";
-  const orderCode = getDriverOrderNumber(order);
+  const senderName = order?.senderName || order?.recipientName || "Sender";
+  const receiverName = order?.recipientName || "Customer";
+  const receiverPhone = order?.recipientPhone || order?.customerPhone || "";
+  const orderCode = order ? getDriverOrderNumber(order) : "";
   const displayPhotoUri = photoRemoteUrl || photoUri;
   const canComplete =
     pinVerified && signatureSaved && !!signatureUri && !!photoRemoteUrl && !photoUploading;
 
   React.useEffect(() => {
+    if (!orderId) return;
     let active = true;
 
     (async () => {
       setPinLoading(true);
       setPinError("");
-      const result = await fetchOrderDeliveryConfirmationPin(order.id);
+      const result = await fetchOrderDeliveryConfirmationPin(orderId);
       if (!active) return;
 
       if (result.pin) {
@@ -2167,12 +2290,13 @@ export function DeliveryConfirmationScreen() {
     return () => {
       active = false;
     };
-  }, [order.id]);
+  }, [orderId]);
 
   React.useEffect(() => {
+    if (!orderId) return;
     let active = true;
     (async () => {
-      const proof = await getDeliveryProof(order.id);
+      const proof = await getDeliveryProof(orderId);
       if (!active || !proof) return;
       if (proof.pinVerifiedAt) setPinVerified(true);
       if (proof.signatureImageUri) {
@@ -2188,7 +2312,9 @@ export function DeliveryConfirmationScreen() {
     return () => {
       active = false;
     };
-  }, [order.id]);
+  }, [orderId]);
+
+  if (!order) return null;
 
   async function verifyPin() {
     if (pinVerified || pinVerifying) return;
@@ -2234,6 +2360,13 @@ export function DeliveryConfirmationScreen() {
     setPinVerified(true);
     setPinVerifying(false);
     pinInputRef.current?.blur();
+
+    try {
+      await recordOrderEvent(order.id, "pin_verified");
+    } catch {
+      setPinVerified(false);
+      setPinError("PIN verified locally but failed to sync. Please try again.");
+    }
   }
 
   async function handleSaveSignature(uri: string) {
@@ -2321,6 +2454,11 @@ export function DeliveryConfirmationScreen() {
         logCompleteDelivery("photo_upload_skipped", "Using existing remote URL");
       }
 
+      logCompleteDelivery("receiver_signature_upload_start", { orderId: order.id });
+      const receiverSignatureUrl = await uploadDeliverySignature(order.id, signatureUri);
+      console.log("[CompleteDelivery] uploaded receiver signature URL:", receiverSignatureUrl);
+      logCompleteDelivery("receiver_signature_upload_ok", { url: receiverSignatureUrl });
+
       const now = new Date().toISOString();
       logCompleteDelivery("save_local_proof");
       await saveDeliveryProof({
@@ -2334,7 +2472,7 @@ export function DeliveryConfirmationScreen() {
       });
       logCompleteDelivery("save_local_proof_ok");
 
-      await completeDelivery(order, uploadedUrl);
+      await completeDelivery(order, uploadedUrl, receiverSignatureUrl);
       router.replace({ pathname: "/complete-delivery", params: { id: order.id } });
     } catch (error) {
       const message = supabaseErrorMessage(error);
@@ -2578,6 +2716,7 @@ function DeliverySummaryRow({
 export function CompleteDeliveryScreen() {
   const order = useWorkflowOrder();
   const { completedDeliveries, availableBalance } = useDelivery();
+  if (!order) return null;
 
   const completedRecord =
     completedDeliveries.find((d) => d.orderId === order.id) ||
@@ -2704,26 +2843,16 @@ export function EarningsScreen() {
   const [period, setPeriod] = React.useState<EarningsPeriod>("today");
   const topPad = safeTop() + 4;
   const bottomPad = safeBottom() + 46;
-  const usingDemo = !completedDeliveries.length;
-  const sourceRows = usingDemo ? DEMO_EARNINGS_ROWS : completedDeliveries;
-  const periodRows = filterEarningsByPeriod(sourceRows, period);
-  const computedTotal = periodRows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
-  const computedCount = periodRows.length;
-  const computedMiles = periodRows.reduce((sum, row) => sum + parseMilesFromDistance(row.distance), 0);
-  const computedOnlineMinutes = periodRows.reduce(
+  const periodRows = filterEarningsByPeriod(completedDeliveries, period);
+  const totalEarnings = periodRows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+  const deliveryCount = periodRows.length;
+  const milesDriven = periodRows.reduce((sum, row) => sum + parseMilesFromDistance(row.distance), 0);
+  const onlineMinutes = periodRows.reduce(
     (sum, row) => sum + Number(row.durationMinutes || 0),
     0
   );
-  const demoStats = DEMO_EARNINGS_STATS[period];
-  const totalEarnings = usingDemo ? demoStats.total : computedTotal;
-  const balance = usingDemo ? 142.5 : availableBalance;
-  const deliveryCount = usingDemo ? demoStats.count : computedCount;
-  const milesDriven = usingDemo ? demoStats.miles : computedMiles;
   const averagePerDelivery = deliveryCount ? totalEarnings / deliveryCount : 0;
-  const onlineMinutes = usingDemo ? demoStats.onlineMinutes : computedOnlineMinutes;
-  const changePct = usingDemo
-    ? 12
-    : computeEarningsChangePct(completedDeliveries, period, totalEarnings);
+  const changePct = computeEarningsChangePct(completedDeliveries, period, totalEarnings);
   const listRows = periodRows.slice(0, 5);
 
   return (
@@ -2839,7 +2968,7 @@ export function EarningsScreen() {
           <View style={styles.earningsBalanceTop}>
             <View style={{ flex: 1, minWidth: 0 }}>
               <Text style={styles.earningsBalanceLabel}>AVAILABLE BALANCE</Text>
-              <Text style={styles.earningsBalanceAmount}>£{balance.toFixed(2)}</Text>
+              <Text style={styles.earningsBalanceAmount}>£{availableBalance.toFixed(2)}</Text>
               <Text style={styles.earningsBalanceSub}>Your earnings are ready to withdraw.</Text>
             </View>
             <View style={styles.earningsWalletArt}>
@@ -2881,79 +3010,6 @@ type EarningsRow = {
   durationMinutes: number;
 };
 
-const DEMO_EARNINGS_STATS: Record<
-  EarningsPeriod,
-  { total: number; count: number; miles: number; onlineMinutes: number }
-> = {
-  today: { total: 142.5, count: 18, miles: 64, onlineMinutes: 522 },
-  week: { total: 486.5, count: 52, miles: 178, onlineMinutes: 2140 },
-  month: { total: 1284.2, count: 148, miles: 420, onlineMinutes: 6800 },
-};
-
-const DEMO_EARNINGS_ROWS: EarningsRow[] = [
-  {
-    id: "demo-e1",
-    orderId: "demo-e1",
-    packageId: "SD-ORD-12345",
-    pickupAddress: "Donegall Square, Belfast, BT1 3AB",
-    deliveryAddress: "Ormeau Road, Belfast, BT7 2LR",
-    amount: 9.4,
-    distance: "3.2 miles",
-    date: todayAt(8, 15),
-    durationMinutes: 28,
-  },
-  {
-    id: "demo-e2",
-    orderId: "demo-e2",
-    packageId: "SD-ORD-12346",
-    pickupAddress: "High Street, Bangor, BT20 5BG",
-    deliveryAddress: "Regent Street, Newtownards, BT23 4AD",
-    amount: 12.5,
-    distance: "4.1 miles",
-    date: todayAt(7, 45),
-    durationMinutes: 34,
-  },
-  {
-    id: "demo-e3",
-    orderId: "demo-e3",
-    packageId: "SD-ORD-12347",
-    pickupAddress: "Castle Street, Belfast, BT1 1GH",
-    deliveryAddress: "Lisburn Road, Belfast, BT9 7AA",
-    amount: 8.75,
-    distance: "2.8 miles",
-    date: todayAt(6, 30),
-    durationMinutes: 22,
-  },
-  {
-    id: "demo-e4",
-    orderId: "demo-e4",
-    packageId: "SD-ORD-12348",
-    pickupAddress: "Main Street, Lisburn, BT28 1AB",
-    deliveryAddress: "Church Road, Belfast, BT6 8DD",
-    amount: 15.2,
-    distance: "5.6 miles",
-    date: todayAt(5, 15),
-    durationMinutes: 41,
-  },
-  {
-    id: "demo-e5",
-    orderId: "demo-e5",
-    packageId: "SD-ORD-12349",
-    pickupAddress: "Market Square, Dungannon, BT70 1AB",
-    deliveryAddress: "Bridge Street, Belfast, BT1 1LU",
-    amount: 11.3,
-    distance: "4.4 miles",
-    date: todayAt(4, 0),
-    durationMinutes: 36,
-  },
-];
-
-function todayAt(hour: number, minute: number) {
-  const date = new Date();
-  date.setHours(hour, minute, 0, 0);
-  return date.toISOString();
-}
-
 function earningsPeriodStart(period: EarningsPeriod) {
   const start = new Date();
   start.setHours(0, 0, 0, 0);
@@ -2967,15 +3023,25 @@ function earningsPeriodStart(period: EarningsPeriod) {
 
 function filterEarningsByPeriod(rows: EarningsRow[], period: EarningsPeriod) {
   const start = earningsPeriodStart(period);
-  return rows.filter((row) => new Date(row.date) >= start);
+  return rows.filter((row) => {
+    const timestamp = Date.parse(row.date);
+    return !Number.isNaN(timestamp) && timestamp >= start.getTime();
+  });
 }
 
-function parseMilesFromDistance(distance?: string) {
-  const match = distance?.match(/([\d.]+)/);
+function parseMilesFromDistance(distance?: string | number | null) {
+  if (distance == null) return 0;
+  if (typeof distance === "number") {
+    return Number.isNaN(distance) ? 0 : distance;
+  }
+  if (typeof distance !== "string") return 0;
+  const distanceText = distance.trim();
+  if (!distanceText) return 0;
+  const match = distanceText.match(/([\d.]+)/);
   if (!match) return 0;
   const value = Number.parseFloat(match[1]);
   if (Number.isNaN(value)) return 0;
-  return distance?.toLowerCase().includes("km") ? value * 0.621371 : value;
+  return distanceText.toLowerCase().includes("km") ? value * 0.621371 : value;
 }
 
 function formatOnlineTime(totalMinutes: number) {
@@ -3012,8 +3078,12 @@ function computeEarningsChangePct(
   yesterdayEnd.setDate(yesterdayEnd.getDate() + 1);
   const yesterdayTotal = rows
     .filter((row) => {
-      const date = new Date(row.date);
-      return date >= yesterdayStart && date < yesterdayEnd;
+      const timestamp = Date.parse(row.date);
+      return (
+        !Number.isNaN(timestamp) &&
+        timestamp >= yesterdayStart.getTime() &&
+        timestamp < yesterdayEnd.getTime()
+      );
     })
     .reduce((sum, row) => sum + row.amount, 0);
   if (yesterdayTotal <= 0) return currentTotal > 0 ? 100 : 0;
@@ -3968,6 +4038,25 @@ const styles = StyleSheet.create({
     borderRadius: flow.radius,
     padding: flow.space.sm,
   },
+  dashboardEmptyCard: {
+    alignItems: "center",
+    gap: 6,
+    paddingVertical: flow.space.lg,
+  },
+  dashboardEmptyTitle: {
+    color: flow.text,
+    fontSize: 13,
+    fontFamily: "Inter_700Bold",
+    textAlign: "center",
+  },
+  dashboardEmptySub: {
+    color: flow.muted,
+    fontSize: 11,
+    fontFamily: "Inter_500Medium",
+    textAlign: "center",
+    lineHeight: 16,
+    maxWidth: 280,
+  },
   dashboardHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 0 },
   dashboardProfile: { flexDirection: "row", alignItems: "center", gap: 9, flex: 1 },
   dashboardPhoto: { width: 46, height: 46, borderRadius: 23, borderWidth: 2, borderColor: flow.cyan },
@@ -4045,6 +4134,74 @@ const styles = StyleSheet.create({
   upcomingAddressStreet: { color: flow.text, fontSize: 9, fontFamily: "Inter_600SemiBold", lineHeight: 12 },
   upcomingAddressMeta: { color: flow.muted, fontSize: 8, fontFamily: "Inter_500Medium" },
   upcomingAddressPostcode: { color: flow.cyan, fontSize: 8, fontFamily: "Inter_700Bold" },
+  dispatchCard: { gap: 6, marginBottom: 8, paddingVertical: 10, paddingHorizontal: 10 },
+  dispatchTopRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 },
+  dispatchOrderId: { flex: 1, color: flow.text, fontSize: 12, fontFamily: "Inter_700Bold" },
+  dispatchTopMeta: { flexDirection: "row", alignItems: "center", gap: 8 },
+  dispatchTierPill: {
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+  },
+  dispatchTierText: { fontSize: 8, fontFamily: "Inter_700Bold", letterSpacing: 0.3 },
+  dispatchEarnings: { color: flow.cyan, fontSize: 14, fontFamily: "Inter_700Bold" },
+  dispatchRouteRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderTopWidth: 1,
+    borderTopColor: flow.line,
+    paddingTop: 6,
+  },
+  dispatchPostcode: { color: flow.cyan, fontSize: 13, fontFamily: "Inter_700Bold", letterSpacing: 0.2 },
+  dispatchAge: {
+    marginLeft: "auto",
+    color: flow.muted,
+    fontSize: 9,
+    fontFamily: "Inter_600SemiBold",
+  },
+  dispatchStatsRow: { flexDirection: "row", gap: 6 },
+  dispatchStat: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    borderWidth: 1,
+    borderColor: flow.line,
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    backgroundColor: "rgba(7,11,16,0.65)",
+  },
+  dispatchStatLabel: { color: flow.muted2, fontSize: 7, fontFamily: "Inter_700Bold", letterSpacing: 0.3 },
+  dispatchStatValue: { color: flow.text, fontSize: 10, fontFamily: "Inter_700Bold" },
+  dispatchActions: { flexDirection: "row", gap: 8, marginTop: 2 },
+  dispatchRejectBtn: {
+    flex: 1,
+    minHeight: 42,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: flow.red,
+    backgroundColor: "rgba(239,35,60,0.08)",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+  },
+  dispatchAcceptBtn: {
+    flex: 1,
+    minHeight: 42,
+    borderRadius: 10,
+    backgroundColor: flow.cyan,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+  },
+  dispatchRejectText: { color: flow.red, fontSize: 11, fontFamily: "Inter_700Bold", letterSpacing: 0.4 },
+  dispatchAcceptText: { color: flow.onCyan, fontSize: 11, fontFamily: "Inter_700Bold", letterSpacing: 0.4 },
+  dispatchBtnDisabled: { opacity: 0.45 },
   startPickupBtn: {
     flexDirection: "row",
     alignItems: "center",

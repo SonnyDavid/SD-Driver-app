@@ -40,33 +40,81 @@ export const flow = {
   space: { xs: 4, sm: 8, md: 12, lg: 16, xl: 22, page: 12 },
 };
 
-export const demoOrder = {
-  id: "demo",
-  pickupAddress: "25 Donegall Square North, Belfast BT1 5GS",
-  deliveryAddress: "12 High Street, Bangor BT20 5BG",
-  distance: "3.7 km",
-  payout: 20,
-  packageType: "Parcel",
-  customerPhone: "+44 7700 900123",
-  recipientName: "Emma Wilson",
-  recipientPhone: "+44 7700 900123",
-  orderNumber: "SD-ORD-12345",
-  packageId: "SD-ORD-12345",
-  deliveryNotes: "Leave at reception if recipient is unavailable.",
-  pickupInstructions:
-    "Please report to the reception desk and show your Driver ID. Collection point is at the loading bay on the right-hand side.",
-  senderName: "Bright Retail Co",
-  senderPhone: "+44 28 9024 5678",
-  pin: "123456",
-  status: "en_route",
-};
+function normalizeDistanceText(distance: unknown): string {
+  if (distance == null) return "";
+  if (typeof distance === "number") {
+    return Number.isNaN(distance) ? "" : String(distance);
+  }
+  if (typeof distance === "string") {
+    return distance.trim();
+  }
+  return "";
+}
 
-export function estimateTravelMinutes(distance?: string) {
-  const value = Number.parseFloat(distance || "");
+/** Safe display for order distance — handles string, number, null, undefined. */
+export function formatDistanceDisplay(distance: unknown): string {
+  if (distance == null) return "N/A";
+  if (typeof distance === "number") {
+    if (Number.isNaN(distance)) return "N/A";
+    return `${distance.toFixed(1)} mi`;
+  }
+  if (typeof distance === "string") {
+    return distance.trim() || "N/A";
+  }
+  return "N/A";
+}
+
+export function estimateTravelMinutes(distance?: unknown) {
+  const distanceText = normalizeDistanceText(distance);
+  const value = Number.parseFloat(distanceText || "");
   if (Number.isNaN(value)) return "12 min";
-  const isMiles = distance?.toLowerCase().includes("mile");
+  const isMiles = distanceText.toLowerCase().includes("mile");
   const km = isMiles ? value * 1.609 : value;
   return `${Math.max(5, Math.round(km * 2.8))} min`;
+}
+
+export type ServiceTier = "Priority" | "Standard" | "Scheduled";
+
+export function resolveServiceTier(
+  deliveryType?: string | null,
+  options?: { scheduledPickup?: string | null }
+): ServiceTier {
+  const normalized = (deliveryType || "").trim().toLowerCase();
+  if (normalized.includes("sched")) return "Scheduled";
+  if (normalized.includes("priority") || normalized.includes("express") || normalized.includes("same-day")) {
+    return "Priority";
+  }
+  if (options?.scheduledPickup) return "Scheduled";
+  return "Standard";
+}
+
+export function serviceTierColor(tier: ServiceTier) {
+  if (tier === "Priority") return flow.amber;
+  if (tier === "Scheduled") return flow.green;
+  return flow.cyan;
+}
+
+export function formatOrderAge(createdAt?: string | null) {
+  if (!createdAt) return "Just now";
+  const timestamp = Date.parse(createdAt);
+  if (Number.isNaN(timestamp)) return "Just now";
+  const minutes = Math.max(0, Math.floor((Date.now() - timestamp) / 60000));
+  if (minutes < 1) return "Just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+export function formatTripDistance(distance?: unknown) {
+  return formatDistanceDisplay(distance);
+}
+
+export function formatTripEta(distance?: unknown) {
+  const value = normalizeDistanceText(distance);
+  if (!value) return "ETA —";
+  return estimateTravelMinutes(value);
 }
 
 export type WorkflowStage =
@@ -156,8 +204,15 @@ export function postcode(address?: string, fallback = "SW1") {
   return address.split(",")[0]?.trim() || fallback;
 }
 
-/** Extract UK-style postcode for dashboard route display. */
-export function extractPostcode(address?: string, fallback = "BT1 3AB") {
+/** Extract UK-style postcode for display (optional explicit field takes priority). */
+export function extractPostcode(
+  address?: string,
+  explicitPostcode?: string | null,
+  fallback = ""
+) {
+  if (explicitPostcode?.trim()) {
+    return explicitPostcode.replace(/\s+/g, " ").trim().toUpperCase();
+  }
   if (!address) return fallback;
   const match = address.match(/\b([A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2})\b/i);
   if (match) return match[1].replace(/\s+/g, " ").trim().toUpperCase();
@@ -172,12 +227,19 @@ export function routePostcodes(from?: string, to?: string) {
   return `${extractPostcode(from)} → ${extractPostcode(to)}`;
 }
 
-export function parseAddressLines(address?: string, fallbackStreet = "Address pending", fallbackCity = "Belfast") {
-  const postcode = extractPostcode(address);
+export function parseAddressLines(
+  address?: string,
+  fallbackStreet = "Address pending",
+  fallbackCity = "",
+  explicitPostcode?: string | null
+) {
+  const postcode = extractPostcode(address, explicitPostcode);
   if (!address) {
-    return { street: fallbackStreet, locality: `${fallbackCity} ${postcode}`, postcode };
+    return { street: fallbackStreet, locality: `${fallbackCity} ${postcode}`.trim(), postcode };
   }
-  const withoutPostcode = address.replace(new RegExp(postcode.replace(/\s+/g, "\\s*"), "i"), "").replace(/,\s*$/, "").trim();
+  const withoutPostcode = postcode
+    ? address.replace(new RegExp(postcode.replace(/\s+/g, "\\s*"), "i"), "").replace(/,\s*$/, "").trim()
+    : address.trim();
   const parts = withoutPostcode.split(",").map((part) => part.trim()).filter(Boolean);
   if (parts.length >= 2) {
     const street = parts[0];
@@ -385,7 +447,7 @@ export function RouteSummary({
 }) {
   return (
     <View style={[styles.routeSummary, compact && { paddingVertical: 8 }]}>
-      <RoutePoint label="Pickup" code={extractPostcode(from, "BT1 3AB")} detail={cityLine(from, "Belfast City Centre")} />
+      <RoutePoint label="Pickup" code={extractPostcode(from, null, "BT1 3AB")} detail={cityLine(from, "Belfast City Centre")} />
       <View style={styles.routeConnector}>
         <View style={styles.routeDot} />
         <View style={styles.routeLine} />
@@ -393,7 +455,7 @@ export function RouteSummary({
         <View style={styles.routeLine} />
         <View style={[styles.routeDot, { backgroundColor: flow.green }]} />
       </View>
-      <RoutePoint label="Dropoff" code={extractPostcode(to, "BT7 2XY")} detail={cityLine(to, "Ormeau Road")} alignRight />
+      <RoutePoint label="Dropoff" code={extractPostcode(to, null, "BT7 2XY")} detail={cityLine(to, "Ormeau Road")} alignRight />
     </View>
   );
 }
@@ -461,7 +523,7 @@ export function ParcelArt({ imageUri }: { imageUri?: string }) {
   );
 }
 
-export function SignaturePanel({ name = "Emma Wilson", captured }: { name?: string; captured?: boolean }) {
+export function SignaturePanel({ name = "Customer", captured }: { name?: string; captured?: boolean }) {
   return (
     <View style={styles.signature}>
       <Text style={styles.signatureHint}>{captured ? "Signature Captured" : "Tap to capture signature"}</Text>

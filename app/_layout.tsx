@@ -17,6 +17,7 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { IncomingOrderNotifier } from "@/components/IncomingOrderNotifier";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { DeliveryProvider } from "@/contexts/DeliveryContext";
+import { initOrderNotifications } from "@/lib/orderNotifications";
 
 SplashScreen.preventAutoHideAsync();
 
@@ -105,6 +106,10 @@ export default function RootLayout() {
       SplashScreen.hideAsync();
     }
   }, [fontsLoaded, fontError]);
+
+  useEffect(() => {
+    void initOrderNotifications();
+  }, []);
 
   if (!fontsLoaded && !fontError) return null;
 
